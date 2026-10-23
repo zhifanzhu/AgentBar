@@ -1,0 +1,5 @@
+#!/bin/sh
+# Hotkey target: poke the running bar over D-Bus (fast), or start it.
+gdbus call --session --dest dev.agentbar.Prototype --object-path /dev/agentbar/Prototype \
+  --method org.freedesktop.Application.Activate '{}' >/dev/null 2>&1 \
+  || { cd "$(dirname "$(readlink -f "$0")")/.." && exec "$HOME/.venvs/agentbar/bin/python" agentbar.py; }
