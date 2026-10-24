@@ -38,6 +38,7 @@ HELP = ("/show me how to … — step-by-step guidance; the agent won't do it fo
         "/model — show the brain · /model gemini|local [MODEL] — switch · /models — list models · "
         "/key gemini KEY — save API key · /ground holo|gemini — who finds elements on screen · "
         "/answers google|duckduckgo|bing|chatgpt|perplexity — where questions open · "
+        "/remember TEXT — note about you, sent with every request · "
         "/new — new conversation · /shot — screenshot to slide")
 
 CSS = b"""
@@ -270,6 +271,11 @@ class AgentBar(Gtk.ApplicationWindow):
         elif cmd == "/answers":
             self.status.set_text(f"Questions open in {cfg.get('answer_engine', 'duckduckgo')} · "
                                  f"/answers {'|'.join(spec.ENGINES)}")
+        elif cmd == "/remember" and len(args) >= 2:
+            brain.remember(text.split(None, 1)[1])
+            self.status.set_text(f"Remembered · {brain.USER_NOTES}")
+        elif cmd == "/remember":
+            self.status.set_text(f"/remember TEXT adds a line to {brain.USER_NOTES}")
         elif cmd == "/new":
             self.agent.reset()
             self.status.set_text("New conversation")
