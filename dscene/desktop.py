@@ -136,24 +136,29 @@ class Desktop:
             panes.append(pane)
         return SceneSpec(name=name, layout="free", panes=panes) if panes else None  # None: empty desktop
 
-    def close_deck(self, keep=None):
-        """Drop the deck and the other tabs the agent opened (answers, decks from before a
-        restart). The user's own tabs always stay. keep: a deck scene index whose tabs stay
-        open where they are (the card the user is looking at; a later close_deck closes them).
-        A window left with only blank tabs is hidden (Chromium keeps running, so the next deck
-        opens quickly); one with the user's tabs shows their last tab."""
-        kept = set(self.tabs[keep]) if keep is not None and keep < len(self.tabs) else set()
+    def close_deck(self, final=False):
+        """Drop the deck and close the tabs the agent opened that the user hasn't taken up
+        (answers, decks from before a restart; see ChromeSlot.agent_tabs). The user's own tabs
+        always stay. Unless final, the agent's tabs on screen stay too: the user may be looking
+        at them, and a second close (final) takes them. A window left with only blank tabs is
+        hidden; one with the user's tabs shows their last tab, back where it was before the deck.
+        Returns the titles of the tabs kept on screen."""
+        kept_titles = []
         for slot in self.slots:
             if not slot.alive():
                 continue
-            mine = [t for t in slot.agent_tabs() if t not in kept]
-            left = [t["id"] for t in slot.pages() if t["id"] not in mine]  # the user's, and kept
+            pages = {t["id"]: t for t in slot.pages()}
+            mine = slot.agent_tabs()
+            kept = [] if final else slot.visible_tabs([t for t in mine if pages[t].get("url") != "about:blank"])
+            mine = [t for t in mine if t not in kept]
+            left = [t for t in pages if t not in mine]  # the user's, and kept
             if not left:
                 slot.open("about:blank")  # closing a window's last tab would close the window
             for target_id in mine:
                 slot.close(target_id)
-            if kept & set(left):
-                continue  # this window shows the kept scene: leave it (a later close finishes it)
+            if kept:
+                kept_titles += [pages[t].get("title") or pages[t].get("url", "") for t in kept]
+                continue  # on screen: leave this window as it is (the next close finishes it)
             if left:
                 slot.activate(left[-1])  # back to the user's own tab...
                 slot.give_back()         # ...in the window where it was before the deck
@@ -161,6 +166,7 @@ class Desktop:
                 slot.hide()
                 slot.before = slot.placed = None
         self.scenes, self.tabs, self.rects = [], [], []
+        return kept_titles
 
     def restore(self):
         """Back to the user's own desktop: hide the scene windows."""

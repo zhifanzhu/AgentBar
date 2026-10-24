@@ -86,6 +86,7 @@ class AgentBar(Gtk.ApplicationWindow):
         self.thinking = False   # the agent is working on a request
         self.pending_ask = None  # done() callback while ask_user waits for an answer
         self.quick_answer = None  # what F4 answers while that question waits (guide steps)
+        self.close_armed = False  # a /close kept pages on screen: the next one closes them
         self.asked_at = 0.0
         self.agent = brain.Agent(on_event=lambda line: GLib.idle_add(self._progress, line))
 
@@ -209,6 +210,7 @@ class AgentBar(Gtk.ApplicationWindow):
         entry.set_placeholder_text(f"“{text}”")
         cfg = brain.load_config()
         self.thinking = True
+        self.close_armed = False  # a new request: /close starts over
         if not self.pending_ask:
             self.annotations.remove()  # marks from the last request are done with
         self.reply.set_text("")
@@ -509,12 +511,11 @@ class AgentBar(Gtk.ApplicationWindow):
             self.cards[0].grab_focus()
 
     def close_deck(self):
-        """/close, in two steps when a card is showing: the first closes the rest of the deck
-        but keeps the card the user is looking at; the next closes that too. The agent only
-        closes tabs it opened, never the user's own."""
-        keep = self.current if self.cards else None
-        name = self.desktop.scenes[keep].name if keep is not None else None
-        RECORDER.op("user", "close_deck", scenes=len(self.cards), kept=name)
+        """/close, in two steps when the agent's pages are on screen: the first closes the deck
+        and every agent tab out of sight but keeps what the user is looking at; the next closes
+        that too. The agent never closes the user's tabs (or ones they've taken up)."""
+        final, self.close_armed = self.close_armed, False
+        RECORDER.op("user", "close_deck", scenes=len(self.cards), final=final)
         self.caption.hide()
         for child in self.cards_box.get_children():
             child.destroy()
@@ -523,16 +524,22 @@ class AgentBar(Gtk.ApplicationWindow):
 
         def work():
             try:
-                self.desktop.close_deck(keep)
-                note = (f"Kept “{name}” open · /close again to close it" if name
+                kept = self.desktop.close_deck(final)
+                note = (f"Kept “{kept[0][:40]}”{f' and {len(kept) - 1} more' if len(kept) > 1 else ''} "
+                        "on screen · /close again to close it" if kept
                         else "Closed the agent's tabs · yours stay open")
             except Exception as e:  # noqa: BLE001 - show the failure in the bar
-                note = f"Closing failed: {e}"
-            GLib.idle_add(self.status.set_text, note)
-            if not name:
-                GLib.idle_add(self.desktop.refocus)
+                kept, note = [], f"Closing failed: {e}"
+            GLib.idle_add(self._closed, bool(kept), note)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _closed(self, kept_some, note):
+        self.close_armed = kept_some  # the next /close closes what was kept
+        self.status.set_text(note)
+        if not kept_some:
+            self.desktop.refocus()
+        return False
 
     @staticmethod
     def _card_markup(scene):

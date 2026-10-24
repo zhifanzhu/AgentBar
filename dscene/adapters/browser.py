@@ -186,9 +186,15 @@ class ChromeSlot:
                 if t.get("type") == "page" and not t.get("url", "").startswith("chrome://")]
 
     def open(self, url):
+        """Show url in a tab of the agent's: its blank tab if it has one, else a new tab."""
+        if url != "about:blank":
+            blank = next((t["id"] for t in self.pages() if t.get("url") in ("", "about:blank")), None)
+            if blank:
+                self.navigate(blank, url)
+                return blank
         target_id = self._get("/json/new?" + urllib.parse.quote(url, safe=""), method="PUT")["id"]
         tabs = _agent_tabs()
-        tabs[target_id] = url
+        tabs[target_id] = {"url": url, "history": 1}
         _save_agent_tabs(tabs)
         return target_id
 
@@ -200,23 +206,52 @@ class ChromeSlot:
 
     def navigate(self, target_id, url):
         """Load url in one of the agent's tabs (it stays the agent's)."""
+        try:
+            before = js(self.port, target_id, "history.length") or 1
+        except Exception:  # noqa: BLE001 - a tab that can't answer yet has just the one entry
+            before = 1
         cdp(self.port, target_id, "Page.navigate", {"url": url})
         tabs = _agent_tabs()
-        if target_id in tabs:
-            tabs[target_id] = url
-            _save_agent_tabs(tabs)
+        tabs[target_id] = {"url": url, "history": before + 1}
+        _save_agent_tabs(tabs)
 
     def agent_tabs(self):
-        """Ids of this window's tabs that are the agent's to close: ones it opened that still
-        show the site it opened, and blank tabs. Every other tab is the user's."""
+        """Ids of this window's tabs that are the agent's to close: blank tabs, and ones it
+        opened that the user hasn't taken up. A tab is the user's once they've moved on from
+        the page the agent loaded (its history grew: a click, a search, a video picked), it's
+        playing sound or video, it's on another site, or the agent never opened it."""
         opened, mine = _agent_tabs(), []
         for t in self.pages():
             url = t.get("url", "")
-            if url in ("", "about:blank") or (
-                    t["id"] in opened
-                    and urllib.parse.urlsplit(url).netloc == urllib.parse.urlsplit(opened[t["id"]]).netloc):
+            if url in ("", "about:blank"):
+                mine.append(t["id"])
+                continue
+            record = opened.get(t["id"])
+            if record is None:
+                continue
+            if isinstance(record, str):  # recorded before history counts were kept
+                record = {"url": record, "history": 1}
+            if urllib.parse.urlsplit(url).netloc != urllib.parse.urlsplit(record["url"]).netloc:
+                continue
+            try:
+                used = js(self.port, t["id"], "({history: history.length, playing: [...document.querySelectorAll("
+                                              "'video, audio')].some(m => !m.paused && !m.ended)})")
+            except Exception:  # noqa: BLE001 - can't tell: leave it to the user
+                continue
+            if used["history"] <= record["history"] and not used["playing"]:
                 mine.append(t["id"])
         return mine
+
+    def visible_tabs(self, ids):
+        """Those of ids that are on screen: the tab showing in a window that isn't minimized."""
+        shown = []
+        for target_id in ids:
+            try:
+                if tab_state(self.port, target_id)["visible"]:
+                    shown.append(target_id)
+            except Exception:  # noqa: BLE001
+                continue
+        return shown
 
     def activate(self, target_id):
         self._get(f"/json/activate/{target_id}")
