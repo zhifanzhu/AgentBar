@@ -169,6 +169,15 @@ class AgentBar(Gtk.ApplicationWindow):
         self.toaster.show_centered(markup, y + h - 40)
         self.toast_timer = GLib.timeout_add(seconds * 1000, self._end_toast)
 
+    def copy_text(self, text):
+        """Clipboard and middle-click selection; the VNC clipboard passes it on to the viewer."""
+        for selection in (Gdk.SELECTION_CLIPBOARD, Gdk.SELECTION_PRIMARY):
+            clipboard = Gtk.Clipboard.get(selection)
+            clipboard.set_text(text, -1)
+            clipboard.store()
+        short = text if len(text) <= 28 else text[:27] + "…"
+        self.toast(f"Copied “{GLib.markup_escape_text(short)}” · Ctrl+Shift+V to paste", 4)
+
     def _end_toast(self):
         self.toaster.hide()
         self.toast_timer = None

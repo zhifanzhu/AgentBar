@@ -4,12 +4,12 @@ Runs inside the bar process, in a background thread, serving MCP over HTTP at
 http://127.0.0.1:8765/mcp. Tools that touch GTK are run on the GTK main loop;
 slow work (Chrome, Blender, LibreOffice, the grounding model) runs in worker threads.
 
-Core tools (15):
+Core tools (18):
   scene  get_scene, set_scene, capture_scene, set_deck, swap_scene, save_deck
   guide  annotate (incl. toasts), clear_annotations, guide_step
-  look   get_screen, find_element
+  look   get_screen, find_element, read_terminal
   user   ask_user, select_region
-  app    insert_image_to_slides, blender_run
+  app    insert_image_to_slides, blender_run, open_terminal, copy_text
 There is deliberately no click/type tool: app state is set through app APIs (each change
 one undo step), and the user does the clicking in tutorials.
 """
@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 import brain
 from dscene import desktop, grounding, spec
-from dscene.adapters import blender, browser, impress
+from dscene.adapters import blender, browser, impress, terminal
 
 PORT = 8765
 INSTRUCTIONS = """dscene controls the user's Linux desktop (XFCE, one screen) through the agent bar.
@@ -263,6 +263,19 @@ def build(bar):
         return Image(data=jpeg, format="jpeg")
 
     @server.tool()
+    async def read_terminal(window: str | None = None, lines: int = 60) -> dict:
+        """The exact text of terminal windows (xfce4-terminal), read through the accessibility
+        tree: commands, output, errors, links, codes, character for character, so prefer it
+        over a screenshot for terminals. Each tab: window id, title, whether it's the tab
+        showing, and its last `lines` lines. window: just that window's tabs."""
+        terms = await asyncio.to_thread(terminal.read_text, await asyncio.to_thread(desktop.list_windows), lines)
+        if window is not None:
+            terms = [t for t in terms if t["window"] and int(t["window"], 16) == int(window, 16)]
+            if not terms:
+                raise ValueError(f"no terminal text for window {window}")
+        return {"terminals": terms}
+
+    @server.tool()
     async def find_element(description: str) -> dict:
         """Find a UI element on screen from a description (e.g. "the wrench icon in Blender's
         properties editor"). Returns its centre {x, y} in screen pixels. Uses a vision model;
@@ -292,6 +305,25 @@ def build(bar):
         """Put an image (e.g. from select_region) on a new slide in LibreOffice Impress,
         starting Impress if needed. One Ctrl+Z in Impress undoes it."""
         return await asyncio.to_thread(impress.insert_image, path)
+
+    @server.tool()
+    async def open_terminal(command: str, cwd: str | None = None) -> dict:
+        """Open a new terminal window with `command` typed at the prompt but NOT run: the user
+        reads it and presses Enter to run it (or edits it, or Ctrl+C to drop it); afterwards
+        it's a normal shell. Use it when the user wants a shell command run. You never run
+        commands yourself. cwd: the directory to start in (default home)."""
+        win = await asyncio.to_thread(terminal.open_with_command, command, cwd, None, desktop.list_windows)
+        if win is None:
+            raise ValueError("the terminal window didn't appear")
+        return {"window": win, "waiting_for_enter": True}
+
+    @server.tool()
+    async def copy_text(text: str) -> dict:
+        """Put text on the clipboard (and the middle-click selection), so the user can paste it
+        anywhere, e.g. a command into a terminal they already have open (Ctrl+Shift+V). Shows
+        a short "Copied" notice."""
+        await _on_gtk(bar.copy_text, text)
+        return {"copied": len(text)}
 
     @server.tool(structured_output=False)
     async def blender_run(code: str, label: str, changes: bool = True) -> list:

@@ -50,7 +50,7 @@ TEACH = ("[Teaching mode] Show me how, step by step with guide_step, so I do it 
 
 # Tools that change what's on screen: each is followed by a checkpoint in the trajectory.
 CHANGES_DESKTOP = {"set_scene", "set_deck", "swap_scene", "guide_step", "insert_image_to_slides",
-                   "blender_run"}
+                   "blender_run", "open_terminal"}
 
 SYSTEM = """You are the agent behind the agent bar on the user's Linux desktop (Arch Linux,
 XFCE, one screen). The user types requests into the bar; you act through the dscene tools.
@@ -89,6 +89,17 @@ Show, don't tell: change what's on screen rather than writing long answers.
   again. The user's keyboard stays in their app, so steps like "press Escape" work (leave
   out element). Only say the task is complete when the screenshot shows it. Don't click for
   the user.
+- Things on screen: when the user points at something there ("that link", "this error",
+  "check the terminal", "what does it say"), look before anything else: read_terminal for
+  terminals (exact text), get_screen otherwise. Look once: terminal text is enough, so act
+  on it directly without also taking a screenshot. Never web-search for what's on their
+  screen. To open a link from a terminal, use set_scene with a pane of kind "url" and the
+  exact URL as printed.
+- Shell commands: you can't run them, the user does. When they want a command run ("install
+  X", "type it into the terminal for me"), call open_terminal with it: it waits at the
+  prompt for their Enter. When they want the text ("give me the command", "copy that"),
+  call copy_text. Don't make them copy commands from a guide_step bubble. Then reply in one
+  line, e.g. "Typed in a new terminal: press Enter to run".
 - "Remember this" / "go back to how it was": capture_scene returns a restorable description
   of the screen; set_scene with it brings that moment back.
 - Use ask_user when the request is ambiguous. Use annotate kind "toast" only for notices in
