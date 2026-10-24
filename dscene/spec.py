@@ -6,9 +6,14 @@ send through the protocol and what gets saved to disk:
 
     {"dscene": 1, "name": "The Savoy", "note": "Strand · from £420",
      "layout": "split-2",
-     "panes": [{"kind": "url", "url": "https://www.thesavoylondon.com/"},
+     "panes": [{"kind": "url", "url": "https://www.thesavoylondon.com/", "scroll_y": 900},
                {"kind": "map", "lat": 51.5104, "lon": -0.1206, "label": "The Savoy"}],
      "caption": "5-star, riverside"}
+
+Browser panes (url, map, search) live in the bar's own Chromium windows. App panes
+(blender, impress, window) are the user's own app windows. Every pane is a state
+descriptor: the fields needed to bring that window back. `fidelity` (set when a
+scene is captured) says how much comes back: exact, view, or layout only.
 """
 import json
 import urllib.error
@@ -21,22 +26,50 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 VERSION = 1
-LAYOUTS = {"full": 1, "split-2": 2, "split-3": 3}
+LAYOUTS = {"full": 1, "split-2": 2, "split-3": 3}  # plus "free": every pane brings its own rect
+BROWSER_KINDS = ("url", "map", "search")
+APP_KINDS = ("blender", "impress", "window")
 DECKS = Path.home() / ".local" / "share" / "dscene" / "decks"
+BLOBS = Path.home() / ".local" / "share" / "dscene" / "blobs"  # .blend / .odp checkpoints
 
 
 class Pane(BaseModel):
-    """One browser pane. kind=url shows a page, map shows OpenStreetMap, search a web search."""
-    kind: Literal["url", "map", "search"] = Field(
-        description="url: the page at `url`; map: OpenStreetMap at lat/lon (or a search for "
-                    "`label`); search: a web search for `query`")
-    url: str | None = Field(None, description="For kind=url: a real URL, e.g. from search results")
-    lat: float | None = Field(None, description="For kind=map: latitude")
-    lon: float | None = Field(None, description="For kind=map: longitude")
-    label: str | None = Field(None, description="For kind=map: the place's name")
-    query: str | None = Field(None, description="For kind=search: what to search for")
+    """One window in a scene, with the state to show in it."""
+    kind: Literal["url", "map", "search", "blender", "impress", "window"] = Field(
+        description="url: a web page; map: OpenStreetMap at lat/lon (or a search for `label`); "
+                    "search: a web search for `query`; blender / impress: the user's Blender or "
+                    "LibreOffice Impress window, optionally restored to a captured state; window: "
+                    "any other app window, matched by `app`, placed but not restored")
+    # browser panes
+    url: str | None = Field(None, description="url: a real URL, e.g. from search results")
+    scroll_y: int | None = Field(None, description="url: vertical scroll position in pixels")
+    lat: float | None = Field(None, description="map: latitude")
+    lon: float | None = Field(None, description="map: longitude")
+    label: str | None = Field(None, description="map: the place's name")
+    query: str | None = Field(None, description="search: what to search for")
+    # blender
+    blend: str | None = Field(None, description="blender: a .blend checkpoint to open (from "
+                                                "capture_scene); omit to keep the current file")
+    selected: list[str] | None = Field(None, description="blender: names of objects to select")
+    active: str | None = Field(None, description="blender: name of the active object")
+    mode: str | None = Field(None, description="blender: OBJECT, EDIT, SCULPT, ...")
+    view: list[float] | None = Field(None, description="blender: 3D view as [loc x, y, z, rotation "
+                                                       "w, x, y, z, distance], from capture_scene")
+    properties_tab: str | None = Field(None, description="blender: properties tab, e.g. MODIFIER")
+    # impress
+    doc: str | None = Field(None, description="impress: path of the presentation to show")
+    slide: int | None = Field(None, description="impress: slide number, 1-based")
+    # any app window
+    app: str | None = Field(None, description="window: app name or title text to match")
+    title: str | None = Field(None, description="The window title when captured (informational)")
+    # placement
+    rect: list[int] | None = Field(None, description="[x, y, width, height]; required in layout free")
+    maximized: bool | None = Field(None, description="Show the window maximized (overrides rect)")
+    fidelity: Literal["exact", "view", "layout"] | None = Field(
+        None, description="Set by capture_scene: how much of this window's state can come back")
 
     def resolve(self):
+        """The URL a browser pane shows."""
         if self.kind == "url" and self.url:
             return self.url
         if self.kind == "map":
@@ -48,37 +81,45 @@ class Pane(BaseModel):
 
 
 class SceneSpec(BaseModel):
-    """One desktop arrangement the user can flip to from the bar."""
+    """One desktop arrangement: what each visible window shows, and where."""
     dscene: int = Field(VERSION, description="Spec version")
     name: str = Field(description="Card title, e.g. the option's name")
     note: str = Field("", description="Key facts for the card, under 60 characters")
-    layout: Literal["full", "split-2", "split-3"] | None = Field(
-        None, description="Pane arrangement; defaults to one matching the number of panes")
-    panes: list[Pane] = Field(description="1-3 panes, left to right")
+    layout: Literal["full", "split-2", "split-3", "free"] | None = Field(
+        None, description="Pane arrangement, left to right; free = every pane gives its own rect. "
+                          "Defaults to one matching the panes")
+    panes: list[Pane] = Field(description="1-3 panes for full/split layouts, up to 8 for free")
     caption: str = Field("", description="Optional text drawn over the last pane")
 
     @model_validator(mode="after")
     def _check_layout(self):
-        if not 1 <= len(self.panes) <= 3:
-            raise ValueError("a scene has 1 to 3 panes")
-        default = {1: "full", 2: "split-2", 3: "split-3"}[len(self.panes)]
         if self.layout is None:
-            self.layout = default
-        elif LAYOUTS[self.layout] != len(self.panes):
-            raise ValueError(f"layout {self.layout} needs {LAYOUTS[self.layout]} panes, got {len(self.panes)}")
+            self.layout = ("free" if all(p.rect for p in self.panes) and self.panes
+                           else {1: "full", 2: "split-2", 3: "split-3"}.get(len(self.panes)))
+        if self.layout == "free":
+            if not 1 <= len(self.panes) <= 8 or not all(p.rect and len(p.rect) == 4 for p in self.panes):
+                raise ValueError("layout free needs 1-8 panes, each with rect [x, y, w, h]")
+        elif self.layout is None or LAYOUTS[self.layout] != len(self.panes):
+            raise ValueError(f"layout {self.layout} doesn't fit {len(self.panes)} panes "
+                             "(full: 1, split-2: 2, split-3: 3, free: each pane has a rect)")
         return self
 
+    def browser_panes(self):
+        return [p for p in self.panes if p.kind in BROWSER_KINDS]
+
     def urls(self):
-        return [p.resolve() for p in self.panes]
+        return [p.resolve() for p in self.browser_panes()]
 
 
 def search_url(text):
     return "https://duckduckgo.com/?q=" + urllib.parse.quote(text)
 
 
-def layout_rects(layout, area):
-    """Split area = (x, y, w, h) into equal side-by-side rects for the layout."""
-    n = LAYOUTS[layout]
+def layout_rects(scene, area):
+    """Where each pane goes: its own rect (free layout) or equal side-by-side splits of area."""
+    if scene.layout == "free":
+        return [tuple(p.rect) for p in scene.panes]
+    n = LAYOUTS[scene.layout]
     x, y, w, h = area
     cuts = [x + w * i // n for i in range(n + 1)]
     return [(cuts[i], y, cuts[i + 1] - cuts[i], h) for i in range(n)]

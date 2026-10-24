@@ -39,23 +39,27 @@ DSCENE_URL = "http://127.0.0.1:8765/mcp"
 
 SYSTEM = """You are the agent behind the agent bar on the user's Linux desktop (Arch Linux,
 XFCE, one screen). The user types requests into the bar; you act through the dscene tools.
+Show, don't tell: change what's on screen rather than writing long answers.
 
 - Comparing options (hotels, restaurants, products, papers): research first (Google Search),
-  then call prepare_scenes with one scene per option, 2-5 scenes. For places use two panes:
-  the place's own page (kind "url", a real URL from your search results) and a map (kind
-  "map" with lat/lon). Put key facts in note, under 60 characters. Never invent prices or
-  URLs; use a pane of kind "search" when you don't have a real URL.
+  then call set_deck with one scene per option, 2-5 scenes. For places use two panes: the
+  place's own page (kind "url", a real URL from your search results) and a map (kind "map"
+  with lat/lon). Put key facts in note, under 60 characters. Never invent prices or URLs;
+  use a pane of kind "search" when you don't have a real URL.
 - Capturing the screen into slides: select_region, then insert_image_to_slides with its path.
-- How to do something in an app: bring it to the front and look at it with one focus_app
-  call, then call guide_step once per step. A step is exactly ONE click or key press: opening a
-  menu, picking a submenu and picking an item are separate steps. guide_step marks the
-  control, waits for the user and returns a screenshot of the result: look at it before the
-  next step, and if the step didn't take effect, explain and mark it again. The user's
-  keyboard stays in their app, so steps like "press Escape" work. Only say the task is
-  complete when the screenshot shows it. Don't click for the user.
-- Use ask_user when the request is ambiguous. Use toast only for notices in the middle of
-  a task: don't toast at the end, because your final reply is already shown in the bar.
-- Your final text reply is shown in the bar: one or two short sentences."""
+- How to do something in an app: bring it to the front and look at it with one set_scene
+  call (e.g. {"name": "Blender", "panes": [{"kind": "blender"}]}), then call guide_step once
+  per step. A step is exactly ONE click or key press: opening a menu, picking a submenu and
+  picking an item are separate steps. guide_step marks the control, waits for the user and
+  returns a screenshot of the result: look at it before the next step, and if the step
+  didn't take effect, explain and mark it again. The user's keyboard stays in their app, so
+  steps like "press Escape" work. Only say the task is complete when the screenshot shows it.
+  Don't click for the user.
+- "Remember this" / "go back to how it was": capture_scene returns a restorable description
+  of the screen; set_scene with it brings that moment back.
+- Use ask_user when the request is ambiguous. Use annotate kind "toast" only for notices in
+  the middle of a task: your final reply is already shown in the bar.
+- Your final text reply is shown in the bar: one short sentence."""
 
 
 class BrainError(Exception):
@@ -159,7 +163,7 @@ class Agent:
     """One conversation with the configured model, acting through dscene."""
 
     def __init__(self, on_event=print):
-        self.on_event = on_event  # progress lines for the bar, e.g. "→ prepare_scenes"
+        self.on_event = on_event  # progress lines for the bar, e.g. "→ set_deck"
         self.reset()
 
     def reset(self):
@@ -174,8 +178,10 @@ class Agent:
         try:
             reply = asyncio.run(self._run(text, cfg))
         except Exception as e:
-            RECORDER.end(error=str(e))
-            raise
+            while isinstance(e, BaseExceptionGroup) and e.exceptions:  # the MCP client wraps errors
+                e = e.exceptions[0]
+            RECORDER.end(error=f"{type(e).__name__}: {e}")
+            raise BrainError(f"{type(e).__name__}: {e}") from e
         RECORDER.end(reply=reply)
         return reply
 
@@ -196,11 +202,9 @@ class Agent:
     async def _snapshot(self, dscene, when):
         """Record the desktop (windows, bar state, a screenshot) without showing it to the model."""
         try:
-            listed = await dscene.call_tool("list_windows", {})  # one text block per window
-            windows = [json.loads(c.text) for c in listed.content if c.type == "text"]
-            state, _ = _result_parts(await dscene.call_tool("get_state", {}))
+            state = json.loads(_result_parts(await dscene.call_tool("get_scene", {}))[0])
             _, shots = _result_parts(await dscene.call_tool("get_screen", {}))
-            RECORDER.event("snapshot", when=when, windows=windows, state=json.loads(state),
+            RECORDER.event("snapshot", when=when, windows=state.pop("windows", []), state=state,
                            screenshot=RECORDER.image(shots[0][1], shots[0][0]) if shots else None)
         except Exception as e:  # noqa: BLE001 - recording must never break a request
             RECORDER.event("snapshot_failed", when=when, error=str(e))

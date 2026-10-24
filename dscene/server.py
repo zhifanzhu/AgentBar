@@ -2,22 +2,22 @@
 
 Runs inside the bar process, in a background thread, serving MCP over HTTP at
 http://127.0.0.1:8765/mcp. Tools that touch GTK are run on the GTK main loop;
-slow work (Chrome, LibreOffice, the grounding model) runs in worker threads.
+slow work (Chrome, Blender, LibreOffice, the grounding model) runs in worker threads.
 
-Tool tiers: observe (list_windows, get_state, get_screen, find_element),
-present (prepare_scenes, show_scene, focus_window, restore_desktop, decks),
-guide (annotate, clear_annotations, toast, guide_step), ask (ask_user,
-select_region), act (insert_image_to_slides). There is deliberately no
-click/type tool yet.
+Core tools (14):
+  scene  get_scene, set_scene, capture_scene, set_deck, swap_scene, save_deck
+  guide  annotate (incl. toasts), clear_annotations, guide_step
+  look   get_screen, find_element
+  user   ask_user, select_region
+  app    insert_image_to_slides
+There is deliberately no click/type tool: app state is set through app APIs, and the
+user does the clicking in tutorials.
 """
 import asyncio
 import base64
 import json
-import subprocess
-import sys
 import threading
 import urllib.request
-from pathlib import Path
 from typing import Literal
 
 from gi.repository import GLib
@@ -25,23 +25,23 @@ from mcp.server.mcpserver import Image, MCPServer
 from pydantic import BaseModel, Field
 
 import brain
-import desktop
-from dscene import spec
+from dscene import desktop, spec
+from dscene.adapters import browser, impress
 
 PORT = 8765
-HERE = Path(__file__).resolve().parents[1]
 INSTRUCTIONS = """dscene controls the user's Linux desktop (XFCE, one screen) through the agent bar.
-A scene is a layout of 1-3 browser panes; a deck is a set of scenes the user flips through
-with cards in the bar. Prefer scenes over describing things in text: for comparing options,
-call prepare_scenes with one scene per option. Annotations draw on screen without changing
-any app. Use ask_user when you need the user's choice or need them to act. Never invent URLs:
-use a pane of kind "search" when you don't have a real one."""
+A scene says what each visible window shows and where: browser panes (url, map, search) and
+the user's app windows (blender, impress, other). set_scene makes the screen show a scene,
+restoring each window's state; capture_scene describes the current screen as a scene that
+set_scene can bring back. A deck is a set of browser scenes the user flips through with
+cards in the bar (set_deck, swap_scene). Annotations draw on screen without changing apps.
+Never invent URLs: use a pane of kind "search" when you don't have a real one."""
 
 
 class Target(BaseModel):
     """Where on screen to point. Give exactly one field."""
-    pane: int | None = Field(None, description="Pane index of the scene on screen, 0 = leftmost")
-    window: str | None = Field(None, description="Window id from list_windows")
+    pane: int | None = Field(None, description="Pane index of the scene on screen, 0 = first")
+    window: str | None = Field(None, description="Window id from get_scene")
     element: str | None = Field(
         None, description="A UI element described in words, e.g. \"the 'Add Modifier' button\"; "
                           "found visually by the grounding model")
@@ -109,6 +109,10 @@ def _localize(png, description):
 def build(bar):
     server = MCPServer("dscene", instructions=INSTRUCTIONS, log_level="WARNING")
 
+    async def screen_jpeg():
+        jpeg, _ = await _on_gtk(bar.screenshot_png, None, "jpeg")
+        return Image(data=jpeg, format="jpeg")
+
     async def find(description):
         png, (w, h) = await _on_gtk(bar.screenshot_png)
         nx, ny = await asyncio.to_thread(_localize, png, description)
@@ -136,107 +140,90 @@ def build(bar):
             return (x - 18, y - 18, 36, 36)
         raise ValueError("target needs one of pane, window, element, region, point")
 
-    # -- observe ---------------------------------------------------------------
+    async def ask(question, options, timeout_s):
+        try:
+            return await _on_gtk_later(bar.ask, question, options, timeout=timeout_s)
+        except TimeoutError:
+            await _on_gtk(bar.ask_cancel)
+            return None
+
+    # -- scene -----------------------------------------------------------------
     @server.tool()
-    async def list_windows() -> list[dict]:
-        """List the desktop's windows: id, app, title, rect [x, y, w, h], minimized, and
-        ours (true for the agent bar's own scene windows)."""
-        return await asyncio.to_thread(desktop.list_windows)
+    async def get_scene() -> dict:
+        """What's on screen now, cheaply: the windows on the current workspace (id, app, title,
+        rect, minimized; bottom of the stack first), the deck and which card is showing, pane
+        rects, annotations, any open question, and saved decks. Use capture_scene for full,
+        restorable state."""
+        state = await _on_gtk(bar.dscene_state)
+        windows = await asyncio.to_thread(desktop.list_windows, True)
+        state["windows"] = [w for w in windows if not w["ours"] or w["slot"]]
+        state["saved_decks"] = spec.list_decks()
+        return state
+
+    @server.tool(structured_output=False)
+    async def set_scene(scene: spec.SceneSpec | None = None, look: bool = True) -> list:
+        """Make the screen show `scene`: reuse matching windows, restore each pane's state
+        (page and scroll, Blender checkpoint/selection/view, Impress document and slide),
+        place the panes (later panes on top). E.g. {"name": "Blender", "panes": [{"kind":
+        "blender"}]} just brings Blender to the front, full screen. A scene from capture_scene
+        brings that moment back. Omit `scene` to hide the agent's panes and return to the
+        user's own windows. Returns a report per pane, plus a screenshot when `look`."""
+        if scene is None:
+            result = await _on_gtk(bar.show_scene, None)
+        else:
+            result = await _on_gtk_later(bar.apply_scene, scene, timeout=180)
+        await asyncio.sleep(0.4)  # let windows repaint before the screenshot
+        return [result, await screen_jpeg()] if look else [result]
 
     @server.tool()
-    async def get_state() -> dict:
-        """The agent bar's state: the deck (scene names and notes), which scene is showing
-        (null = the user's own desktop), pane rects on screen, annotations, screen size."""
-        return await _on_gtk(bar.dscene_state)
+    async def capture_scene(name: str = "captured") -> dict:
+        """Describe the current workspace as a scene: every visible window with its state
+        descriptor (exact for Blender and Impress, page and scroll for browser panes, position
+        only for other apps). Pass it to set_scene later to bring this moment back. Blender
+        and Impress states are saved as checkpoint files."""
+        scene = await asyncio.to_thread(bar.desktop.capture_scene, name)
+        return scene.model_dump(exclude_none=True)
 
     @server.tool()
-    async def get_screen(window: str | None = None) -> Image:
-        """A screenshot (JPEG) of the whole screen, or of one window (id from list_windows).
-        Use it to check what the user sees, e.g. whether a tutorial step really happened."""
-        rect = None
-        if window:
-            rect = await resolve(Target(window=window))
-        jpeg, _ = await _on_gtk(bar.screenshot_png, rect, "jpeg")
-        return Image(data=jpeg, format="jpeg")
-
-    @server.tool()
-    async def find_element(description: str) -> dict:
-        """Find a UI element on screen from a description (e.g. "the wrench icon in Blender's
-        properties editor"). Returns its centre {x, y} in screen pixels. Uses a vision model;
-        works in apps without accessibility data, like Blender."""
-        x, y = await find(description)
-        return {"x": x, "y": y}
-
-    # -- present ---------------------------------------------------------------
-    @server.tool()
-    async def prepare_scenes(scenes: list[spec.SceneSpec], show_first: bool = True) -> dict:
-        """Replace the deck with these scenes and show them as cards in the bar (the user flips
-        with the arrow keys). Each scene is 1-3 browser panes side by side, e.g. an option's
-        page next to a map. Page links that turn out not to exist are replaced by a web search.
-        Returns the deck."""
+    async def set_deck(scenes: list[spec.SceneSpec] | None = None, saved: str | None = None,
+                       show_first: bool = True) -> dict:
+        """Replace the deck with these scenes (or a saved deck by name) and show them as cards
+        in the bar; the user flips with the arrow keys. Use it to compare options: one scene
+        per option, e.g. its page next to a map. Browser panes are preloaded so flipping is
+        instant. Page links that don't exist are replaced by a web search."""
+        if saved:
+            _, scenes = spec.load_deck(saved)
+        if not scenes:
+            raise ValueError("give scenes or the name of a saved deck")
         return await _on_gtk_later(bar.present_deck, scenes, show_first, timeout=120)
 
     @server.tool()
-    async def show_scene(index: int) -> dict:
-        """Switch the desktop to scene `index` of the current deck (0-based)."""
+    async def swap_scene(index: int | None) -> dict:
+        """Show deck scene `index` (0-based), or null for the user's own windows. Instant."""
         return await _on_gtk(bar.show_scene, index)
 
     @server.tool()
-    async def focus_window(window: str) -> dict:
-        """Bring a window (id from list_windows) to the front, un-minimizing it. Use this to
-        show the app a tutorial is about before annotating it."""
-        await _on_gtk(bar.show_scene, None)  # scene windows would cover it
-        await asyncio.to_thread(subprocess.run, ["wmctrl", "-i", "-a", window])
-        await asyncio.sleep(0.5)  # let it repaint before anyone takes a screenshot
-        return {"focused": window}
-
-    @server.tool(structured_output=False)
-    async def focus_app(name: str) -> list:
-        """Bring an app to the front by name (matched against window app and title, e.g.
-        "blender", "impress", "firefox") and return its window info plus a screenshot of the
-        screen. One call instead of list_windows + focus_window + get_screen."""
-        wanted = name.lower()
-        windows = [w for w in await asyncio.to_thread(desktop.list_windows)
-                   if not w["ours"] and (wanted in w["app"].lower() or wanted in w["title"].lower())]
-        if not windows:
-            raise ValueError(f"no window matches {name!r}; see list_windows")
-        win = windows[0]
-        await focus_window(win["id"])
-        jpeg, _ = await _on_gtk(bar.screenshot_png, None, "jpeg")
-        return [win, Image(data=jpeg, format="jpeg")]
-
-    @server.tool()
-    async def restore_desktop() -> dict:
-        """Hide the scene windows and return to the user's own desktop."""
-        return await _on_gtk(bar.show_scene, None)
-
-    @server.tool()
     async def save_deck(name: str) -> dict:
-        """Save the current deck under a name, so it can be reopened later with load_deck."""
+        """Save the current deck under a name, to reopen later with set_deck(saved=name)."""
         scenes = await _on_gtk(lambda: list(bar.desktop.scenes))
         if not scenes:
             raise ValueError("no deck to save")
         return {"saved": str(spec.save_deck(name, scenes)), "scenes": len(scenes)}
 
-    @server.tool()
-    async def load_deck(name: str, show_first: bool = True) -> dict:
-        """Reopen a saved deck by name (see list_decks)."""
-        _, scenes = spec.load_deck(name)
-        return await _on_gtk_later(bar.present_deck, scenes, show_first, timeout=120)
-
-    @server.tool()
-    async def list_decks() -> list[str]:
-        """Names of saved decks."""
-        return spec.list_decks()
-
     # -- guide -----------------------------------------------------------------
     @server.tool()
-    async def annotate(target: Target, text: str = "",
-                       kind: Literal["box", "step", "label", "arrow", "spotlight"] = "box",
-                       step: int | None = None) -> dict:
+    async def annotate(text: str = "", target: Target | None = None,
+                       kind: Literal["box", "step", "label", "arrow", "spotlight", "toast"] = "box",
+                       step: int | None = None, seconds: int = 4) -> dict:
         """Draw on top of the screen without touching any app. kind: box (outline), step
         (numbered tutorial marker, give `step`), label (text only), arrow (arrow with text),
-        spotlight (dim everything else). Returns the annotation id and the rect it marks."""
+        spotlight (dim everything else), toast (a short notice at the bottom for `seconds`; no
+        target). Returns the annotation id and the rect it marks."""
+        if kind == "toast":
+            await _on_gtk(bar.toast, GLib.markup_escape_text(text), seconds)
+            return {"shown": True}
+        if target is None:
+            raise ValueError(f"kind {kind} needs a target")
         rect = await resolve(target)
         item_id = await _on_gtk(bar.annotations.add, kind, rect, text, step)
         return {"id": item_id, "rect": list(rect)}
@@ -245,29 +232,6 @@ def build(bar):
     async def clear_annotations(ids: list[int] | None = None) -> dict:
         """Remove annotations by id, or all of them when ids is omitted."""
         return {"removed": await _on_gtk(bar.annotations.remove, ids)}
-
-    @server.tool()
-    async def toast(text: str, seconds: int = 4) -> dict:
-        """Show a short notice near the bottom of the screen."""
-        await _on_gtk(bar.toast, GLib.markup_escape_text(text), seconds)
-        return {"shown": True}
-
-    # -- ask -------------------------------------------------------------------
-    async def ask(question, options, timeout_s):
-        try:
-            return await _on_gtk_later(bar.ask, question, options, timeout=timeout_s)
-        except TimeoutError:
-            await _on_gtk(bar.ask_cancel)
-            return None
-
-    @server.tool()
-    async def ask_user(question: str, options: list[str] | None = None, timeout_s: int = 300) -> dict:
-        """Ask the user in the agent bar and wait for the answer. With options, they get one
-        button per option; they can also type a free answer (F4 focuses the bar). The bar
-        doesn't take keyboard focus, so the user's keys keep going to their app. Use it to
-        confirm before anything risky or to let them choose. Returns {"answer": text}, or
-        {"answer": null} if they don't answer in time."""
-        return {"answer": await ask(question, options or [], timeout_s)}
 
     @server.tool(structured_output=False)
     async def guide_step(step: int, instruction: str, target: Target,
@@ -285,8 +249,42 @@ def build(bar):
         finally:
             await _on_gtk(bar.annotations.remove, [item_id])
         await asyncio.sleep(0.4)  # let the app repaint after the user's action
-        jpeg, _ = await _on_gtk(bar.screenshot_png, None, "jpeg")
-        return [{"step": step, "answer": answer, "marked": list(rect)}, Image(data=jpeg, format="jpeg")]
+        return [{"step": step, "answer": answer, "marked": list(rect)}, await screen_jpeg()]
+
+    # -- look ------------------------------------------------------------------
+    @server.tool()
+    async def get_screen(window: str | None = None) -> Image:
+        """A screenshot (JPEG) of the whole screen, or of one window by id. A window is captured
+        even when covered by others; the agent's browser panes even when hidden or minimized."""
+        if window is None:
+            return await screen_jpeg()
+        wins = {int(w["id"], 16): w for w in await asyncio.to_thread(desktop.list_windows)}
+        win = wins.get(int(window, 16))
+        if win is None:
+            raise ValueError(f"no window {window}")
+        if win["slot"]:  # a browser pane: ask Chromium directly, works while hidden
+            slot = next(s for s in bar.desktop.slots if s.role == win["slot"])
+            tab = await asyncio.to_thread(slot.current_tab)
+            return Image(data=await asyncio.to_thread(browser.tab_screenshot, slot.port, tab), format="jpeg")
+        jpeg = await _on_gtk(bar.screenshot_window, window)
+        return Image(data=jpeg, format="jpeg")
+
+    @server.tool()
+    async def find_element(description: str) -> dict:
+        """Find a UI element on screen from a description (e.g. "the wrench icon in Blender's
+        properties editor"). Returns its centre {x, y} in screen pixels. Uses a vision model;
+        works in apps without accessibility data, like Blender."""
+        x, y = await find(description)
+        return {"x": x, "y": y}
+
+    # -- user ------------------------------------------------------------------
+    @server.tool()
+    async def ask_user(question: str, options: list[str] | None = None, timeout_s: int = 300) -> dict:
+        """Ask the user in the agent bar and wait for the answer. With options, they get one
+        button per option; they can also type a free answer (F4 focuses the bar). The bar
+        doesn't take keyboard focus, so the user's keys keep going to their app. Returns
+        {"answer": text}, or {"answer": null} if they don't answer in time."""
+        return {"answer": await ask(question, options or [], timeout_s)}
 
     @server.tool()
     async def select_region(prompt: str = "Drag to select") -> dict:
@@ -295,18 +293,12 @@ def build(bar):
         path, rect = await _on_gtk_later(bar.select_region, prompt, timeout=300)
         return {"region": list(rect) if rect else None, "path": path}
 
-    # -- act -------------------------------------------------------------------
+    # -- app -------------------------------------------------------------------
     @server.tool()
     async def insert_image_to_slides(path: str) -> dict:
         """Put an image (e.g. from select_region) on a new slide in LibreOffice Impress,
         starting Impress if needed. One Ctrl+Z in Impress undoes it."""
-        r = await asyncio.to_thread(subprocess.run, [sys.executable, str(HERE / "impress.py"), path],
-                                    capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            raise RuntimeError((r.stderr.strip().splitlines() or ["Impress failed"])[-1])
-        info = json.loads(r.stdout)
-        await asyncio.to_thread(subprocess.run, ["wmctrl", "-a", f"{info['title']} — LibreOffice Impress"])
-        return info
+        return await asyncio.to_thread(impress.insert_image, path)
 
     return server
 

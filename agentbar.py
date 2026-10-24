@@ -10,8 +10,6 @@ The bar hosts the dscene MCP server (dscene/server.py). Requests go to the
 brain (brain.py), an agent that acts only through dscene tools, the same tools
 any other MCP client can use. Commands start with "/" (see /help).
 """
-import json
-import subprocess
 import sys
 import threading
 import time
@@ -21,12 +19,14 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+gi.require_version("GdkX11", "3.0")
+from gi.repository import Gdk, GdkX11, GLib, Gtk  # noqa: E402
 
 import brain  # noqa: E402
 import dscene.server  # noqa: E402
-from desktop import Desktop  # noqa: E402
 from dscene import spec  # noqa: E402
+from dscene.adapters import impress  # noqa: E402
+from dscene.desktop import Desktop  # noqa: E402
 from dscene.recorder import RECORDER  # noqa: E402
 from overlay import AnnotationLayer, Caption  # noqa: E402
 from selector import RegionSelector  # noqa: E402
@@ -263,6 +263,46 @@ class AgentBar(Gtk.ApplicationWindow):
         ok, data = pixbuf.save_to_bufferv(fmt, keys, values)
         return bytes(data), (w, h)
 
+    def screenshot_window(self, win_id, fmt="jpeg"):
+        """One window's own pixels by X id: right even when other windows cover it."""
+        win = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), int(win_id, 16))
+        pixbuf = Gdk.pixbuf_get_from_window(win, 0, 0, win.get_width(), win.get_height()) if win else None
+        if pixbuf is None:
+            raise ValueError(f"window {win_id} has no pixels (minimized or gone?)")
+        keys, values = (["quality"], ["85"]) if fmt == "jpeg" else ([], [])
+        return bytes(pixbuf.save_to_bufferv(fmt, keys, values)[1])
+
+    def apply_scene(self, scene, done):
+        """set_scene: reconcile the desktop towards scene in a worker thread, then report."""
+        self.preparing = True
+        area = self.scene_area()
+
+        def work():
+            try:
+                result = {"scene": scene.name, "panes": self.desktop.set_scene(scene, area)}
+            except Exception as e:  # noqa: BLE001
+                result = {"scene": scene.name, "error": f"{type(e).__name__}: {e}"}
+            GLib.idle_add(finish, result)
+
+        def finish(result):
+            self.preparing = False
+            self.current = None  # a set scene isn't one of the deck's cards
+            for card in self.cards:
+                card.get_style_context().remove_class("active")
+            if scene.caption and self.desktop.rects:
+                x, y, w, h = self.desktop.rects[-1]
+                self.caption.show_at(f"{GLib.markup_escape_text(scene.name)}\n<span size='small'>"
+                                     f"{GLib.markup_escape_text(scene.caption)}</span>", x + 24, y + h - 24)
+            else:
+                self.caption.hide()
+            if self.annotations.items:
+                self.annotations.refresh()
+            RECORDER.event("set_scene", name=scene.name, panes=[p.kind for p in scene.panes])
+            done(result)
+            return False
+
+        threading.Thread(target=work, daemon=True).start()
+
     def present_deck(self, scenes, show_first, done):
         """Build the deck's windows in the background, then show its cards (and scene 0)."""
         self.preparing = True
@@ -367,15 +407,11 @@ class AgentBar(Gtk.ApplicationWindow):
         threading.Thread(target=self._insert_slide, args=(path,), daemon=True).start()
 
     def _insert_slide(self, path):
-        # A separate process: a hung LibreOffice connection can't freeze the bar.
-        r = subprocess.run([sys.executable, str(HERE / "impress.py"), str(path)],
-                           capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            err = (r.stderr.strip().splitlines() or ["unknown error"])[-1]
-            GLib.idle_add(self.toast, f"Couldn't add to Impress: {GLib.markup_escape_text(err)}", 6)
+        try:
+            info = impress.insert_image(path)
+        except Exception as e:  # noqa: BLE001 - show any failure in the notice
+            GLib.idle_add(self.toast, f"Couldn't add to Impress: {GLib.markup_escape_text(str(e))}", 6)
             return
-        info = json.loads(r.stdout)
-        subprocess.run(["wmctrl", "-a", f"{info['title']} — LibreOffice Impress"])
         GLib.idle_add(self.toast, f"Added as slide {info['slide']} of {info['total']}"
                                   "  <span size='small'>· Ctrl+Z in Impress to undo</span>")
 
