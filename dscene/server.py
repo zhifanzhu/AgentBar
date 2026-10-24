@@ -4,20 +4,17 @@ Runs inside the bar process, in a background thread, serving MCP over HTTP at
 http://127.0.0.1:8765/mcp. Tools that touch GTK are run on the GTK main loop;
 slow work (Chrome, Blender, LibreOffice, the grounding model) runs in worker threads.
 
-Core tools (14):
+Core tools (15):
   scene  get_scene, set_scene, capture_scene, set_deck, swap_scene, save_deck
   guide  annotate (incl. toasts), clear_annotations, guide_step
   look   get_screen, find_element
   user   ask_user, select_region
-  app    insert_image_to_slides
-There is deliberately no click/type tool: app state is set through app APIs, and the
-user does the clicking in tutorials.
+  app    insert_image_to_slides, blender_run
+There is deliberately no click/type tool: app state is set through app APIs (each change
+one undo step), and the user does the clicking in tutorials.
 """
 import asyncio
-import base64
-import json
 import threading
-import urllib.request
 from typing import Literal
 
 from gi.repository import GLib
@@ -25,8 +22,8 @@ from mcp.server.mcpserver import Image, MCPServer
 from pydantic import BaseModel, Field
 
 import brain
-from dscene import desktop, spec
-from dscene.adapters import browser, impress
+from dscene import desktop, grounding, spec
+from dscene.adapters import blender, browser, impress
 
 PORT = 8765
 INSTRUCTIONS = """dscene controls the user's Linux desktop (XFCE, one screen) through the agent bar.
@@ -46,7 +43,9 @@ class Target(BaseModel):
         None, description="A UI element described in words, e.g. \"the 'Add Modifier' button\"; "
                           "found visually by the grounding model")
     region: list[int] | None = Field(None, description="[x, y, width, height] in screen pixels")
-    point: list[int] | None = Field(None, description="[x, y] in screen pixels")
+    point: list[int] | None = Field(
+        None, description="[x, y] in screen pixels, only as returned by find_element; never "
+                          "estimate coordinates from a screenshot (use element instead)")
 
 
 async def _on_gtk(fn, *args):
@@ -85,27 +84,6 @@ async def _on_gtk_later(fn, *args, timeout=None):
     return await asyncio.wait_for(fut, timeout)
 
 
-def _localize(png, description):
-    """Ask the grounding model (Holo) where description is in the PNG screenshot."""
-    cfg = brain.load_config()["grounding"]
-    schema = {"type": "object", "properties": {"x": {"type": "integer", "minimum": 0, "maximum": 1000},
-                                                "y": {"type": "integer", "minimum": 0, "maximum": 1000}},
-              "required": ["x", "y"]}
-    prompt = ("Localize an element on the GUI image according to the provided target and output a "
-              f"click position.\n * You must output a valid JSON following the format: {json.dumps(schema)}\n"
-              f" Your target is:\n{description}")
-    body = {"model": cfg["model"], "temperature": 0.0, "max_tokens": 64,
-            "messages": [{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}},
-                {"type": "text", "text": prompt}]}],
-            "structured_outputs": {"json": schema}, "chat_template_kwargs": {"enable_thinking": False}}
-    req = urllib.request.Request(f"{cfg['url']}/chat/completions", data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        point = json.loads(json.load(r)["choices"][0]["message"]["content"])
-    return point["x"], point["y"]
-
-
 def build(bar):
     server = MCPServer("dscene", instructions=INSTRUCTIONS, log_level="WARNING")
 
@@ -115,7 +93,7 @@ def build(bar):
 
     async def find(description):
         png, (w, h) = await _on_gtk(bar.screenshot_png)
-        nx, ny = await asyncio.to_thread(_localize, png, description)
+        (nx, ny), _ = await asyncio.to_thread(grounding.localize, png, description)
         return round(nx / 1000 * w), round(ny / 1000 * h)
 
     async def resolve(target):
@@ -140,9 +118,9 @@ def build(bar):
             return (x - 18, y - 18, 36, 36)
         raise ValueError("target needs one of pane, window, element, region, point")
 
-    async def ask(question, options, timeout_s):
+    async def ask(question, options, timeout_s, quick=None):
         try:
-            return await _on_gtk_later(bar.ask, question, options, timeout=timeout_s)
+            return await _on_gtk_later(bar.ask, question, options, quick, timeout=timeout_s)
         except TimeoutError:
             await _on_gtk(bar.ask_cancel)
             return None
@@ -216,18 +194,19 @@ def build(bar):
     @server.tool()
     async def annotate(text: str = "", target: Target | None = None,
                        kind: Literal["box", "step", "label", "arrow", "spotlight", "toast"] = "box",
-                       step: int | None = None, seconds: int = 4) -> dict:
+                       step: int | None = None, seconds: int = 8) -> dict:
         """Draw on top of the screen without touching any app. kind: box (outline), step
         (numbered tutorial marker, give `step`), label (text only), arrow (arrow with text),
-        spotlight (dim everything else), toast (a short notice at the bottom for `seconds`; no
-        target). Returns the annotation id and the rect it marks."""
+        spotlight (dim everything else), toast (a short notice at the bottom; no target).
+        It disappears after `seconds` (0: stays until clear_annotations), and when the user
+        presses Esc in the bar or asks something new. Returns the annotation id and rect."""
         if kind == "toast":
-            await _on_gtk(bar.toast, GLib.markup_escape_text(text), seconds)
+            await _on_gtk(bar.toast, GLib.markup_escape_text(text), seconds or 4)
             return {"shown": True}
         if target is None:
             raise ValueError(f"kind {kind} needs a target")
         rect = await resolve(target)
-        item_id = await _on_gtk(bar.annotations.add, kind, rect, text, step)
+        item_id = await _on_gtk(bar.annotations.add, kind, rect, text, step, seconds or None)
         return {"id": item_id, "rect": list(rect)}
 
     @server.tool()
@@ -236,22 +215,34 @@ def build(bar):
         return {"removed": await _on_gtk(bar.annotations.remove, ids)}
 
     @server.tool(structured_output=False)
-    async def guide_step(step: int, instruction: str, target: Target,
+    async def guide_step(step: int, instruction: str, element: str | None = None,
                          options: list[str] | None = None, timeout_s: int = 600) -> list:
-        """One tutorial step in a single call: mark `target` with a numbered STEP badge and
-        `instruction`, show the instruction in the bar (without taking keyboard focus from the
-        user's app), wait until the user answers (default options "Done" / "Stop"), remove the
-        mark, and return their answer plus a screenshot of the screen right afterwards, so you
-        can check the step really happened before choosing the next one. A step is ONE click or
-        key press; target an element by description (found visually) or by point/region."""
-        rect = await resolve(target)
+        """One tutorial step in a single call: find `element` on screen (a UI control described
+        in words, e.g. "the X (close) button of the Chromium window"; located by the grounding
+        model, so never give coordinates), mark it with a numbered STEP badge and
+        `instruction` (the agent bar hides meanwhile, so it covers nothing), wait until the user
+        answers (Done / Stop buttons beside the mark, or F4 for Done; default options "Done" /
+        "Stop"), remove the mark, and return their answer
+        plus a screenshot of the screen right afterwards, so you can check the step really
+        happened before choosing the next one. A step is ONE click or key press; leave out
+        `element` for a key press that has nothing to point at."""
+        if await _on_gtk(bar.get_visible):
+            await _on_gtk(bar.step_mode)
+            await asyncio.sleep(0.3)  # let the windows underneath repaint before looking
+        if element:
+            x, y = await find(element)
+            rect = (x - 18, y - 18, 36, 36)
+        else:
+            rect = None
+        options = options or ["Done", "Stop"]
         item_id = await _on_gtk(bar.annotations.add, "step", rect, instruction, step)
+        await _on_gtk(bar.annotations.add_buttons, item_id, options, bar.answer)
         try:
-            answer = await ask(f"Step {step}: {instruction}", options or ["Done", "Stop"], timeout_s)
+            answer = await ask(f"Step {step}: {instruction}", options, timeout_s, quick=options[0])
         finally:
             await _on_gtk(bar.annotations.remove, [item_id])
         await asyncio.sleep(0.4)  # let the app repaint after the user's action
-        return [{"step": step, "answer": answer, "marked": list(rect)}, await screen_jpeg()]
+        return [{"step": step, "answer": answer, "marked": list(rect) if rect else None}, await screen_jpeg()]
 
     # -- look ------------------------------------------------------------------
     @server.tool()
@@ -301,6 +292,25 @@ def build(bar):
         """Put an image (e.g. from select_region) on a new slide in LibreOffice Impress,
         starting Impress if needed. One Ctrl+Z in Impress undoes it."""
         return await asyncio.to_thread(impress.insert_image, path)
+
+    @server.tool(structured_output=False)
+    async def blender_run(code: str, label: str, changes: bool = True) -> list:
+        """Do something in the user's Blender for them: run Python (bpy) inside it. bpy,
+        mathutils, C (context) and D (bpy.data) are imported; the context has a 3D viewport,
+        so bpy.ops work. print() output and a variable `result` come back, with a screenshot.
+        The whole change is one undo step named `label` (e.g. "Aim camera at Cylinder"), so
+        one Ctrl+Z in Blender undoes it. changes=false for a script that only reads (e.g.
+        lists objects): it adds no undo step. Keep scripts short and quick: Blender's UI
+        waits while they run."""
+        if not await asyncio.to_thread(blender.bridge_up):
+            raise ValueError("Blender isn't running with the dscene bridge: start Blender first")
+        try:
+            reply = await asyncio.to_thread(blender.call, {"cmd": "run", "code": code, "label": label,
+                                                         "undo": changes})
+        except RuntimeError as e:
+            raise ValueError(f"{e}; nothing else changed, and Ctrl+Z undoes any partial change") from e
+        await asyncio.sleep(0.3)  # let Blender redraw
+        return [{"output": reply.get("output", ""), "result": reply.get("result")}, await screen_jpeg()]
 
     return server
 

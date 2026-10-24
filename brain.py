@@ -29,20 +29,38 @@ DEFAULTS = {
     "models": {"gemini": "gemini-3.6-flash", "local": "holo3-1-9b"},
     "local_url": "http://10.0.2.2:8000/v1",
     "gemini_api_key": "",
-    "grounding": {"url": "http://10.0.2.2:8000/v1", "model": "holo3-1-9b"},  # for find_element
+    # find_element: holo = local Holo on vast's GPU (~0.6 s); gemini = a Gemini call per lookup
+    "grounding": {"provider": "holo", "url": "http://10.0.2.2:8000/v1", "model": "holo3-1-9b",
+                  "gemini_model": "gemini-3.6-flash"},
     "max_steps": 16,
+    # Where questions open: duckduckgo (default: vast's EU IP gets a Google consent wall),
+    # google, bing, chatgpt, perplexity.
+    "answer_engine": "duckduckgo",
     # minimal is fastest (gemini-3.6-flash: ~1.8 s per step vs ~4.2 s for 3.8-flash at low);
     # models without it (3.8-flash, 4-argon) fall back to low automatically.
     "thinking_level": "minimal",
 }
 GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 DSCENE_URL = "http://127.0.0.1:8765/mcp"
+THINKING_FALLBACK = {}  # model -> level it needs instead of the configured one (learned once)
+# Tools that do the user's task for them; /show (teaching mode) refuses them.
+DOES_IT_FOR_USER = {"blender_run", "insert_image_to_slides"}
+TEACH = ("[Teaching mode] Show me how, step by step with guide_step, so I do it myself. "
+         "Don't do it for me.")
+
 # Tools that change what's on screen: each is followed by a checkpoint in the trajectory.
-CHANGES_DESKTOP = {"set_scene", "set_deck", "swap_scene", "guide_step", "insert_image_to_slides"}
+CHANGES_DESKTOP = {"set_scene", "set_deck", "swap_scene", "guide_step", "insert_image_to_slides",
+                   "blender_run"}
 
 SYSTEM = """You are the agent behind the agent bar on the user's Linux desktop (Arch Linux,
 XFCE, one screen). The user types requests into the bar; you act through the dscene tools.
 Show, don't tell: change what's on screen rather than writing long answers.
+
+- Questions with an answer on the web (weather, facts, news, definitions, "what is", "how
+  tall", prices, scores): don't answer in text and don't search yourself. Call set_scene once
+  with {"name": <short title>, "panes": [{"kind": "search", "query": <the question>}]} and
+  "look": false, so the answer opens in the browser. Then reply with one short line, e.g.
+  "Opened: weather in London".
 
 - Comparing options (hotels, restaurants, products, papers): research first (Google Search),
   then call set_deck with one scene per option, 2-5 scenes. For places use two panes: the
@@ -50,14 +68,25 @@ Show, don't tell: change what's on screen rather than writing long answers.
   with lat/lon). Put key facts in note, under 60 characters. Never invent prices or URLs;
   use a pane of kind "search" when you don't have a real URL.
 - Capturing the screen into slides: select_region, then insert_image_to_slides with its path.
+- Doing vs teaching: when the user asks you to do something ("can you…", "move the camera
+  to…", "delete the cube"), do it; when they ask how ("how do I…", "show me how…"), teach it
+  with guide_step. When unsure, do it.
+- Doing something in Blender: blender_run with a short bpy script (look objects up by name in
+  D.objects; to aim an object at a point use
+  (target - obj.location).to_track_quat('-Z', 'Y').to_euler() for cameras and lights). Check
+  the returned screenshot/result, then reply in one line with what changed and "Ctrl+Z to
+  undo". If it fails, fix the script and try again.
 - How to do something in an app: bring it to the front and look at it with one set_scene
   call (e.g. {"name": "Blender", "panes": [{"kind": "blender"}]}), then call guide_step once
   per step. A step is exactly ONE click or key press: opening a menu, picking a submenu and
-  picking an item are separate steps. guide_step marks the control, waits for the user and
-  returns a screenshot of the result: look at it before the next step, and if the step
-  didn't take effect, explain and mark it again. The user's keyboard stays in their app, so
-  steps like "press Escape" work. Only say the task is complete when the screenshot shows it.
-  Don't click for the user.
+  picking an item are separate steps. Give guide_step the control as `element`, described
+  in words precise enough to tell it apart (e.g. "the X close button in the title bar of the
+  Chromium window"); it is located for you, so never pass or guess pixel coordinates.
+  guide_step marks the control, waits for the user and returns a screenshot of the result:
+  look at it before the next step, and if the step didn't take effect, explain and mark it
+  again. The user's keyboard stays in their app, so steps like "press Escape" work (leave
+  out element). Only say the task is complete when the screenshot shows it. Don't click for
+  the user.
 - "Remember this" / "go back to how it was": capture_scene returns a restorable description
   of the screen; set_scene with it brings that moment back.
 - Use ask_user when the request is ambiguous. Use annotate kind "toast" only for notices in
@@ -151,6 +180,30 @@ def _result_parts(result):
     return (f"ERROR: {text}" if failed else text), images
 
 
+def _stopped(name, text):
+    """Did the user press Stop on a tutorial step? Then the run ends there, whatever the model
+    would do next."""
+    if name != "guide_step":
+        return False
+    try:
+        return json.loads(text).get("answer") == "Stop"
+    except ValueError:
+        return False
+
+
+def _opened_answer(calls, results):
+    """The scene name if this step only opened a search page (the answer lane), else None."""
+    if len(calls) != 1 or calls[0]["name"] != "set_scene":
+        return None
+    scene = (calls[0].get("arguments") or {}).get("scene") or {}
+    panes = scene.get("panes") or []
+    if not panes or any(p.get("kind") != "search" for p in panes):
+        return None
+    if results[0]["result"][0]["text"].startswith("ERROR"):
+        return None
+    return scene.get("name") or panes[0].get("query") or "search"
+
+
 class Agent:
     """One conversation with the configured model, acting through dscene."""
 
@@ -159,15 +212,21 @@ class Agent:
         self.reset()
 
     def reset(self):
-        self.previous_id = None  # Gemini keeps the history server-side
+        self.history = []        # Gemini conversation (Interactions steps), kept here
         self.messages = []       # OpenAI-compatible history, kept here
         self.pending = None      # a checkpoint being captured while the model thinks
+        self.teach = False       # /show: guide only, never do the task for the user
 
-    def run(self, text, cfg=None):
-        """Handle one request; returns the model's final reply. Blocking. Recorded as a run."""
+    def run(self, text, cfg=None, teach=False):
+        """Handle one request; returns the model's final reply. Blocking. Recorded as a run.
+        teach (the /show command): guide the user step by step and never change the app."""
         cfg = cfg or load_config()
         RECORDER.start(text, provider=cfg["provider"], model=cfg["models"][cfg["provider"]],
-                       continues_conversation=bool(self.previous_id or self.messages))
+                       continues_conversation=bool(self.history or self.messages),
+                       mode="teach" if teach else "auto")
+        self.teach = teach
+        if teach:
+            text = f"{TEACH}\n\n{text}"
         try:
             reply = asyncio.run(self._run(text, cfg))
         except Exception as e:
@@ -218,6 +277,10 @@ class Agent:
         """Run one dscene tool; returns (text, images). Desktop changes get a checkpoint,
         captured while the model thinks about its next step."""
         await self._settle()
+        if self.teach and name in DOES_IT_FOR_USER and args.get("changes", True):
+            RECORDER.op("agent", name, args=args, seconds=0, result="refused: teaching mode")
+            return "ERROR: the user asked to be shown how (/show): don't do it for them. " \
+                   "Guide them with guide_step, one step at a time.", []
         self.on_event(f"→ {name}")
         print(f"[agent] {name} {json.dumps(args)[:300]}", flush=True)
         t0 = time.perf_counter()
@@ -252,41 +315,62 @@ class Agent:
         return resp
 
     async def _gemini(self, cfg, text, tools, dscene):
+        """Stateless: the conversation lives here and is sent whole with each call (store=false
+        is ~1.8 s faster per call than keeping it on Google's side). Model steps go back exactly
+        as received, as the API requires; only our own old screenshots are dropped."""
         key = gemini_key(cfg)
         if not key:
             raise BrainError("no Gemini API key: type /key gemini YOUR_KEY")
         declared = [{"type": "function", **t} for t in tools] + [{"type": "google_search"}]
-        step_input = text
-        level = cfg["thinking_level"]
+        self._forget_old_images()
+        self.history.append({"type": "user_input", "content": [{"type": "text", "text": text}]})
+        model = cfg["models"]["gemini"]
+        level = THINKING_FALLBACK.get(model, cfg["thinking_level"])
         for step in range(cfg["max_steps"]):
-            body = {"model": cfg["models"]["gemini"], "input": step_input, "system_instruction": SYSTEM,
-                    "tools": declared, "generation_config": {"thinking_level": level}}
-            if self.previous_id:
-                body["previous_interaction_id"] = self.previous_id
+            body = {"model": model, "input": self.history, "system_instruction": SYSTEM,
+                    "tools": declared, "generation_config": {"thinking_level": level}, "store": False}
             try:
                 resp = await asyncio.to_thread(self._model_call, f"{GEMINI}/interactions", body,
                                                {"x-goog-api-key": key}, step)
             except BrainError as e:
-                if "thinking" not in str(e).lower() or level == "low":
+                if "thinking" in str(e).lower() and level != "low":
+                    level = body["generation_config"]["thinking_level"] = "low"  # model lacks this level
+                    THINKING_FALLBACK[model] = "low"  # don't pay for the failed call again
+                    RECORDER.op("model", "thinking_fallback", error=str(e))
+                elif step == 0 and len(self.history) > 1 and "HTTP 400" in str(e):
+                    self.history = body["input"] = self.history[-1:]  # history rejected: start fresh
+                    RECORDER.op("model", "conversation_reset", error=str(e))
+                else:
                     raise
-                level = body["generation_config"]["thinking_level"] = "low"  # model lacks this level
-                RECORDER.op("model", "thinking_fallback", error=str(e))
                 resp = await asyncio.to_thread(self._model_call, f"{GEMINI}/interactions", body,
                                                {"x-goog-api-key": key}, step)
-            self.previous_id = resp.get("id")
             steps = resp.get("steps", [])
+            self.history.extend(steps)
             calls = [s for s in steps if s.get("type") == "function_call"]
             if not calls:
                 return "\n".join(c.get("text", "") for s in steps if s.get("type") == "model_output"
-                                 for c in s.get("content", []) if c.get("type") == "text").strip()
-            step_input = []
+                                  for c in s.get("content", []) if c.get("type") == "text").strip()
+            results = []
             for call in calls:
                 text, images = await self._call(dscene, call["name"], call.get("arguments") or {})
-                step_input.append({"type": "function_result", "name": call["name"], "call_id": call["id"],
-                                   "result": [{"type": "text", "text": text}] + [
-                                       {"type": "image", "mime_type": mime, "data": data}
-                                       for mime, data in images]})
+                results.append({"type": "function_result", "name": call["name"], "call_id": call["id"],
+                                "result": [{"type": "text", "text": text}] + [
+                                    {"type": "image", "mime_type": mime, "data": data}
+                                    for mime, data in images]})
+            self.history.extend(results)
+            if any(_stopped(r["name"], r["result"][0]["text"]) for r in results):
+                return "Stopped."
+            opened = _opened_answer(calls, results)
+            if opened:  # the browser shows the answer: skip a model call just to say so
+                return f"Opened: {opened}"
         raise BrainError(f"stopped after {cfg['max_steps']} steps")
+
+    def _forget_old_images(self):
+        """Screenshots from earlier requests: replaced by a note, so the history stays small."""
+        for item in self.history:
+            if item.get("type") == "function_result" and any(c.get("type") == "image" for c in item["result"]):
+                item["result"] = [c for c in item["result"] if c.get("type") != "image"] + [
+                    {"type": "text", "text": "(screenshot from an earlier request, omitted)"}]
 
     async def _openai(self, cfg, text, tools, dscene):
         declared = [{"type": "function", "function": t} for t in tools]
@@ -302,6 +386,7 @@ class Agent:
             self.messages.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls")})
             if not msg.get("tool_calls"):
                 return (msg.get("content") or "").strip()
+            stopped = False
             for call in msg["tool_calls"]:
                 try:
                     args = json.loads(call["function"]["arguments"] or "{}")
@@ -312,6 +397,9 @@ class Agent:
                     if images:  # OpenAI-style tool messages carry text only
                         result += "\n[an image was returned but can't be shown to this model]"
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+                stopped = stopped or _stopped(call["function"]["name"], result)
+            if stopped:  # every call has its tool message, so the history stays valid
+                return "Stopped."
         raise BrainError(f"stopped after {cfg['max_steps']} steps")
 
 

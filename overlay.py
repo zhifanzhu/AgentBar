@@ -7,7 +7,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("PangoCairo", "1.0")
 gi.require_foreign("cairo")
-from gi.repository import Gtk, Pango, PangoCairo  # noqa: E402
+from gi.repository import GLib, Gtk, Pango, PangoCairo  # noqa: E402
 
 PAD = 16
 ACCENT = (0.23, 0.36, 0.86)   # boxes, labels, arrows
@@ -22,8 +22,9 @@ class AnnotationLayer(Gtk.Window):
     the annotation is made; they don't follow windows that move afterwards.
     """
 
-    def __init__(self):
+    def __init__(self, top=lambda: 140):
         super().__init__(type=Gtk.WindowType.POPUP)
+        self.top = top  # () -> y where free text goes, e.g. just under the agent bar
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
         if visual and screen.is_composited():
@@ -31,23 +32,45 @@ class AnnotationLayer(Gtk.Window):
         self.set_app_paintable(True)
         self.move(0, 0)
         self.resize(screen.get_width(), screen.get_height())
-        self.items = {}  # id -> {"kind", "rect", "text", "step"}
+        self.items = {}  # id -> {"kind", "rect", "text", "step"}; a step's rect may be None
+        self.buttons = {}  # id -> StepButtons beside that item's bubble
         self.next_id = 1
         self.connect("draw", self._draw)
         self.connect("realize", lambda w: w.input_shape_combine_region(cairo.Region()))
 
-    def add(self, kind, rect, text="", step=None):
+    def add(self, kind, rect, text="", step=None, seconds=None):
+        """Draw an annotation; with seconds, it goes away by itself after that long."""
         item_id = self.next_id
         self.next_id += 1
         self.items[item_id] = {"kind": kind, "rect": rect, "text": text, "step": step}
         self.refresh()
+        if seconds:
+            GLib.timeout_add(int(seconds * 1000), lambda: self.remove([item_id]) and False)
         return item_id
+
+    def add_buttons(self, item_id, options, on_click):
+        """Clickable option buttons beside an item's text bubble; on_click(option)."""
+        if item_id not in self.items:
+            return
+        buttons = StepButtons(options, on_click)
+        bx, by, bw, bh = self._bubble_rect(self.items[item_id])
+        w, h = buttons.get_preferred_size()[1].width, buttons.get_preferred_size()[1].height
+        sw, sh = self.get_screen().get_width(), self.get_screen().get_height()
+        x, y = bx + bw + 8, by + (bh - h) // 2
+        if x + w > sw - 4:  # no room on the right: go under the bubble
+            x, y = min(bx, sw - w - 4), by + bh + 6
+        buttons.move(max(4, x), max(4, min(y, sh - h - 4)))
+        self.buttons[item_id] = buttons
+        buttons.show_all()
+        self.refresh()
 
     def remove(self, ids=None):
         """Remove the given annotation ids, or all of them. Returns the ids removed."""
         gone = list(self.items) if ids is None else [i for i in ids if i in self.items]
         for i in gone:
             del self.items[i]
+            if i in self.buttons:
+                self.buttons.pop(i).destroy()
         self.refresh()
         return gone
 
@@ -58,16 +81,37 @@ class AnnotationLayer(Gtk.Window):
         self.show()
         self.queue_draw()
         self.get_window().raise_()  # stay above windows that scene switches raise
+        for buttons in self.buttons.values():
+            buttons.get_window().raise_()
 
-    def _bubble(self, cr, text, x, y, colour):
-        """A text bubble whose top-left corner is near (x, y), kept on screen."""
-        layout = PangoCairo.create_layout(cr)
+    def _text_layout(self, text, cr=None):
+        layout = PangoCairo.create_layout(cr) if cr else self.create_pango_layout("")
         layout.set_font_description(Pango.FontDescription("Sans Bold 15"))
         layout.set_text(text, -1)
-        tw, th = layout.get_pixel_size()
+        return layout
+
+    def _bubble_at(self, text, x, y):
+        """The rect of a text bubble whose top-left corner is near (x, y), kept on screen."""
+        tw, th = self._text_layout(text).get_pixel_size()
         w, h = tw + 20, th + 12
-        x = max(4, min(x, self.get_allocated_width() - w - 4))
-        y = max(4, min(y, self.get_allocated_height() - h - 4))
+        x = max(4, min(x, self.get_screen().get_width() - w - 4))
+        y = max(4, min(y, self.get_screen().get_height() - h - 4))
+        return x, y, w, h
+
+    def _bubble_rect(self, it):
+        """Where an item's text bubble goes (not for arrows): under its rect, or above when
+        there's no room below; a step without a rect gets a bubble at the top middle."""
+        if it["rect"] is None:
+            w = self._bubble_at(it["text"], 0, 0)[2]
+            return self._bubble_at(it["text"], (self.get_screen().get_width() - w) // 2, self.top())
+        x, y, w, h = it["rect"]
+        below = y + h + 10
+        return self._bubble_at(it["text"], x, below if below + 40 < self.get_screen().get_height() else y - 50)
+
+    def _bubble(self, cr, text, x, y, colour, rect=None):
+        """A text bubble whose top-left corner is near (x, y), kept on screen."""
+        layout = self._text_layout(text, cr)
+        x, y, w, h = rect or self._bubble_at(text, x, y)
         _rounded(cr, x, y, w, h, 8)
         cr.set_source_rgba(*colour, 0.95)
         cr.fill()
@@ -92,8 +136,11 @@ class AnnotationLayer(Gtk.Window):
             cr.fill()
             cr.set_fill_rule(cairo.FILL_RULE_WINDING)
         for it in self.items.values():
-            x, y, w, h = it["rect"]
             colour = STEP if it["kind"] == "step" else ACCENT
+            if it["rect"] is None:  # a step with nothing to point at: just its text
+                self._bubble(cr, it["text"], 0, 0, colour, self._bubble_rect(it))
+                continue
+            x, y, w, h = it["rect"]
             if it["kind"] in ("box", "step", "spotlight"):
                 _rounded(cr, x - 4, y - 4, w + 8, h + 8, 6)
                 cr.set_source_rgba(*colour, 1)
@@ -127,8 +174,7 @@ class AnnotationLayer(Gtk.Window):
                     cr.line_to(tx - 18 * math.cos(ang + side), ty - 18 * math.sin(ang + side))
                 cr.stroke()
             elif it["text"]:
-                below = y + h + 10
-                self._bubble(cr, it["text"], x, below if below + 40 < H else y - 50, colour)
+                self._bubble(cr, it["text"], 0, 0, colour, self._bubble_rect(it))
 
 
 def _rounded(cr, x, y, w, h, r):
@@ -138,6 +184,24 @@ def _rounded(cr, x, y, w, h, r):
     cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
     cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
     cr.close_path()
+
+
+class StepButtons(Gtk.Window):
+    """A row of option buttons that floats over the screen. It takes clicks but never keyboard
+    focus (an override-redirect popup), so the user's keys keep going to their app."""
+
+    def __init__(self, options, on_click):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.set_name("stepbuttons")
+        box = Gtk.Box(spacing=6, margin=5)
+        for i, option in enumerate(options):
+            button = Gtk.Button(label=f"{option}  ·  F4" if i == 0 else option)
+            button.set_can_focus(False)
+            button.get_style_context().add_class("option")
+            button.connect("clicked", lambda _b, o=option: on_click(o))
+            box.pack_start(button, False, False, 0)
+        self.add(box)
+        box.show_all()
 
 
 class Caption(Gtk.Window):

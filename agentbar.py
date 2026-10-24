@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Agent bar prototype: talk to an LLM agent that controls desktop scenes through dscene.
 
-F4 (bin/agentbar-toggle) summons the bar, or hides it if it's already focused.
-Keys: Enter = ask / answer, ←/→ = flip scenes, Esc = back to my desktop (twice: hide).
+F4 (bin/agentbar-toggle) summons the bar, or hides it if it's already focused; while a
+tutorial step waits, F4 answers Done instead.
+Keys: Enter = ask / answer, ←/→ = flip scenes, Esc = clear the agent's marks, else back to
+my desktop (twice: hide).
 On the user's own desktop the bar hides itself when it loses focus; while a
 scene is showing it stays, as the scene's control strip.
 
@@ -32,17 +34,24 @@ from overlay import AnnotationLayer, Caption  # noqa: E402
 from selector import RegionSelector  # noqa: E402
 
 CAPTURES = Path.home() / ".cache" / "agentbar" / "captures"
-HELP = ("/model — show the brain · /model gemini|local [MODEL] — switch · /models — list models · "
-        "/key gemini KEY — save API key · /new — new conversation · /shot — screenshot to slide")
+HELP = ("/show me how to … — step-by-step guidance; the agent won't do it for you · "
+        "/model — show the brain · /model gemini|local [MODEL] — switch · /models — list models · "
+        "/key gemini KEY — save API key · /ground holo|gemini — who finds elements on screen · "
+        "/answers google|duckduckgo|bing|chatgpt|perplexity — where questions open · "
+        "/new — new conversation · /shot — screenshot to slide")
 
 CSS = b"""
 #bar { background: #1c1d24; color: #e8e8ee; }
-#bar entry { font-size: 15px; padding: 8px 12px; background: #2a2c36;
+#bar entry { font-size: 15px; padding: 4px 10px; background: #2a2c36;
              color: #e8e8ee; caret-color: #e8e8ee; border-color: #3b3e4c; }
-#bar button.card { padding: 6px 14px; border-radius: 8px; }
+#bar button.card { padding: 2px 12px; border-radius: 8px; }
 #bar button.card.active { background: #3b5bdb; color: white; }
-#bar button.option { padding: 4px 16px; border-radius: 8px; background: #f59f0a; color: #1c1d24; }
-#bar .status { color: #9a9cab; font-size: 12px; }
+#bar button.option { padding: 2px 14px; border-radius: 8px; background: #f59f0a; color: #1c1d24; }
+#bar .reply { color: #ffffff; font-size: 16px; font-weight: bold; }
+#bar .status { color: #e0e2ea; font-size: 14px; }
+#stepbuttons { background: #1c1d24; }
+#stepbuttons button.option { padding: 4px 14px; border-radius: 8px; background: #f59f0a;
+                             color: #1c1d24; font-weight: bold; }
 #bar .question { color: #f5c46a; font-size: 14px; font-weight: bold; }
 """
 
@@ -68,27 +77,39 @@ class AgentBar(Gtk.ApplicationWindow):
         self.desktop = Desktop()
         self.caption = Caption()
         self.toaster = Caption()
-        self.annotations = AnnotationLayer()
+        self.annotations = AnnotationLayer(top=lambda: self.scene_area()[1] + 24)
         self.toast_timer = None
         self.current = None     # active scene index; None = the user's own desktop
         self.cards = []
         self.preparing = False  # scene windows come and go: don't auto-hide meanwhile
         self.thinking = False   # the agent is working on a request
         self.pending_ask = None  # done() callback while ask_user waits for an answer
+        self.quick_answer = None  # what F4 answers while that question waits (guide steps)
         self.asked_at = 0.0
         self.agent = brain.Agent(on_event=lambda line: GLib.idle_add(self._progress, line))
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
+        self.set_resizable(False)  # the window then shrinks back to fit whatever is shown
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=6)
         self.entry = Gtk.Entry(placeholder_text=self.PLACEHOLDER)
         self.entry.connect("activate", self.on_enter)
         self.question = Gtk.Label(xalign=0, wrap=True)
         self.question.get_style_context().add_class("question")
         self.options_box = Gtk.Box(spacing=8)
         self.cards_box = Gtk.Box(spacing=8)
-        self.status = Gtk.Label(xalign=0, wrap=True)
+        self.reply = Gtk.Label(xalign=0, wrap=True, selectable=True)  # the agent's answer
+        self.reply.get_style_context().add_class("reply")
+        self.reply.set_no_show_all(True)  # shown only once there is a reply
+        self.status = Gtk.Label(xalign=0, wrap=True)  # progress, timing, command output
         self.status.get_style_context().add_class("status")
         self.status.set_text(f"Brain: {brain.describe(brain.load_config())} · /help for commands")
-        for w in (self.entry, self.question, self.options_box, self.cards_box, self.status):
+        self.status.set_hexpand(True)
+        self.ask_row = Gtk.Box(spacing=10)  # a question and its answer buttons, side by side
+        self.ask_row.pack_start(self.question, False, False, 0)
+        self.ask_row.pack_start(self.options_box, False, False, 0)
+        info_row = Gtk.Box(spacing=12)  # the reply, then progress / timing in the same line
+        info_row.pack_start(self.reply, False, False, 0)
+        info_row.pack_start(self.status, True, True, 0)
+        for w in (self.entry, self.ask_row, self.cards_box, info_row):
             box.pack_start(w, False, False, 0)
         self.add(box)
 
@@ -106,8 +127,7 @@ class AgentBar(Gtk.ApplicationWindow):
 
     def _hide_empty(self):
         if not self.pending_ask:
-            self.question.hide()
-            self.options_box.hide()
+            self.ask_row.hide()
         return False
 
     def scene_area(self):
@@ -163,7 +183,10 @@ class AgentBar(Gtk.ApplicationWindow):
             return
         if not text:
             return
-        if text.startswith("/"):
+        teach = text.lower().startswith("/show ")
+        if teach:  # "/show me how to …": a request, in teaching mode
+            text = text[1:]
+        elif text.startswith("/"):
             self.command(text)
             return
         if self.thinking:
@@ -173,13 +196,17 @@ class AgentBar(Gtk.ApplicationWindow):
         entry.set_placeholder_text(f"“{text}”")
         cfg = brain.load_config()
         self.thinking = True
+        if not self.pending_ask:
+            self.annotations.remove()  # marks from the last request are done with
+        self.reply.set_text("")
+        self.reply.hide()
         self.status.set_text(f"Thinking… ({brain.describe(cfg)})")
-        threading.Thread(target=self._think, args=(text, cfg), daemon=True).start()
+        threading.Thread(target=self._think, args=(text, cfg, teach), daemon=True).start()
 
-    def _think(self, text, cfg):
+    def _think(self, text, cfg, teach=False):
         t0 = time.perf_counter()
         try:
-            reply = self.agent.run(text, cfg)
+            reply = self.agent.run(text, cfg, teach)
         except Exception as e:  # noqa: BLE001 - show any failure in the bar
             reply = f"Failed: {e}"
         GLib.idle_add(self._replied, reply, time.perf_counter() - t0, cfg["models"][cfg["provider"]])
@@ -190,8 +217,9 @@ class AgentBar(Gtk.ApplicationWindow):
     def _replied(self, reply, took, model):
         self.thinking = False
         self.entry.set_placeholder_text(self.PLACEHOLDER)
-        text = f"{reply or 'Done.'}  ({took:.1f}s · {model})"
-        self.status.set_text(text)
+        self.reply.set_text(reply or "Done.")
+        self.reply.show()
+        self.status.set_text(f"{took:.1f}s · {model}")
         if not self.get_visible():
             self.toast(GLib.markup_escape_text(reply or "Done."), 5)
 
@@ -220,6 +248,19 @@ class AgentBar(Gtk.ApplicationWindow):
             cfg["gemini_api_key"] = args[2]
             brain.save_config(cfg)
             self.status.set_text(f"Gemini key saved to {brain.CONFIG} · Brain: {brain.describe(cfg)}")
+        elif cmd == "/ground" and len(args) == 2 and args[1].lower() in ("holo", "gemini"):
+            cfg["grounding"]["provider"] = args[1].lower()
+            brain.save_config(cfg)
+            self.status.set_text(f"find_element now uses {args[1].lower()}")
+        elif cmd == "/ground":
+            self.status.set_text(f"find_element uses {cfg['grounding']['provider']} · /ground holo|gemini")
+        elif cmd == "/answers" and len(args) == 2 and args[1].lower() in spec.ENGINES:
+            cfg["answer_engine"] = args[1].lower()
+            brain.save_config(cfg)
+            self.status.set_text(f"Questions now open in {args[1].lower()}")
+        elif cmd == "/answers":
+            self.status.set_text(f"Questions open in {cfg.get('answer_engine', 'duckduckgo')} · "
+                                 f"/answers {'|'.join(spec.ENGINES)}")
         elif cmd == "/new":
             self.agent.reset()
             self.status.set_text("New conversation")
@@ -335,12 +376,17 @@ class AgentBar(Gtk.ApplicationWindow):
         self.go(index)
         return {"showing": self.current}
 
-    def ask(self, question, options, done):
-        """Show a question in the bar without taking keyboard focus from the user's app."""
+    def ask(self, question, options, quick, done):
+        """Show a question in the bar without taking keyboard focus from the user's app.
+        quick: the answer F4 gives (None: F4 focuses the bar to type one). A quick question
+        (a tutorial step) isn't shown in the bar: its buttons sit beside the step's mark."""
         self.ask_cancel()
         self.pending_ask = done
+        self.quick_answer = quick
         self.asked_at = time.time()
         self.desktop.remember_focus()  # where their keys are going now, and go back to
+        if quick:
+            return
         self.question.set_text(question)
         for option in options:
             button = Gtk.Button(label=option)
@@ -348,15 +394,22 @@ class AgentBar(Gtk.ApplicationWindow):
             button.connect("clicked", lambda _b, o=option: self.answer(o))
             self.options_box.pack_start(button, False, False, 0)
         self.entry.set_text("")
-        self.entry.set_placeholder_text("Press a button, or F4 to type an answer…")
+        self.entry.set_placeholder_text(f"Press a button or F4 for {quick}, or click here to type…" if quick
+                                        else "Press a button, or F4 to type an answer…")
         if not self.get_visible():
             self.set_focus_on_map(False)  # appear, but leave the keyboard where it is
             self.show_all()
             GLib.timeout_add(500, lambda: self.set_focus_on_map(True) or False)
-        self.question.show()
-        self.options_box.show_all()
+        self.ask_row.show_all()
+
+    def step_mode(self):
+        """Get out of the way for a tutorial step: the bar must not cover what gets marked."""
+        if self.get_visible():
+            self.dismiss(refocus=self.is_active())
 
     def answer(self, text):
+        if not self.pending_ask:
+            return  # already answered (e.g. F4 and a click together)
         done, self.pending_ask = self.pending_ask, None
         RECORDER.op("user", "answer", answer=text, waited=round(time.time() - self.asked_at, 1))
         self.ask_cancel()
@@ -366,10 +419,10 @@ class AgentBar(Gtk.ApplicationWindow):
 
     def ask_cancel(self):
         self.pending_ask = None
+        self.quick_answer = None
         for child in self.options_box.get_children():
             child.destroy()
-        self.question.hide()
-        self.options_box.hide()
+        self.ask_row.hide()
         self.entry.set_text("")
         self.entry.set_placeholder_text(self.PLACEHOLDER)
 
@@ -466,6 +519,9 @@ class AgentBar(Gtk.ApplicationWindow):
     def on_key(self, _w, event):
         key = event.keyval
         if key == Gdk.KEY_Escape:
+            if self.annotations.items and not self.pending_ask:
+                self.annotations.remove()  # first Esc: clear the agent's marks
+                return True
             if self.pending_ask:
                 self.desktop.refocus()  # Esc never cancels the agent: it hands the keyboard back
             elif self.current is None:
@@ -499,6 +555,8 @@ class App(Gtk.Application):
             self.win = AgentBar(self)
             print("dscene listening on", dscene.server.start(self.win), flush=True)
             self.win.summon()
+        elif self.win.pending_ask and self.win.quick_answer:
+            self.win.answer(self.win.quick_answer)  # F4 during a tutorial step = Done
         elif self.win.get_visible() and self.win.is_active():
             self.win.dismiss(refocus=self.win.current is None)
         else:  # hidden, or visible while the user works in another window

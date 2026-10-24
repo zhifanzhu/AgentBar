@@ -10,10 +10,17 @@ a timer, so they may use bpy freely.
                                      "view": [loc x,y,z, rot w,x,y,z, distance], "properties_tab"}
   {"cmd": "restore", "state": {...}}  same fields; with "blend", the current state is captured
                                       first (returned as "previous") and the checkpoint opened
+  {"cmd": "run", "code": "...", "label": "Aim camera", "undo": true}
+                                 -> {"output": what it printed, "result": its `result` variable}
+                                    the change is one undo step named label (Ctrl+Z undoes it);
+                                    undo false: a read-only look that adds no undo step
 """
+import contextlib
+import io
 import json
 import socket
 import time
+import traceback
 from pathlib import Path
 
 import bpy
@@ -105,6 +112,38 @@ def _after_load(*_args):
         bpy.app.timers.register(lambda: apply(state), first_interval=0.1)
 
 
+def run(code, label="Agent edit", undo=True):
+    """Run Python in Blender (bpy, mathutils, C = context, D = data are at hand) with a 3D
+    viewport as context, then make it one undo step (unless undo is False)."""
+    import mathutils
+    override = _override()
+    for area, _space in _spaces("VIEW_3D"):
+        override.update(area=area, region=next(r for r in area.regions if r.type == "WINDOW"))
+        break
+    out = io.StringIO()
+    with bpy.context.temp_override(**override), contextlib.redirect_stdout(out):
+        scope = {"bpy": bpy, "mathutils": mathutils, "C": bpy.context, "D": bpy.data, "result": None}
+        try:
+            exec(compile(code, "<agent>", "exec"), scope)
+        except Exception as e:  # noqa: BLE001 - the model gets the error to fix its code
+            line = next((f.lineno for f in reversed(traceback.extract_tb(e.__traceback__))
+                         if f.filename == "<agent>"), None)
+            return {"ok": False, "error": f"{type(e).__name__}: {e}" + (f" (line {line})" if line else ""),
+                    "output": out.getvalue()[-2000:]}
+        finally:
+            if undo:
+                bpy.ops.ed.undo_push(message=label)  # partial changes undo in one Ctrl+Z, too
+    for win in bpy.context.window_manager.windows:
+        for area in win.screen.areas:
+            area.tag_redraw()
+    result = scope.get("result")
+    try:
+        json.dumps(result)
+    except TypeError:
+        result = repr(result)
+    return {"ok": True, "output": out.getvalue()[-4000:], "result": result}
+
+
 def _handle(request):
     cmd = request.get("cmd")
     if cmd == "ping":
@@ -113,6 +152,9 @@ def _handle(request):
         return {"ok": True, **capture()}
     if cmd == "restore":
         return restore(request.get("state") or {})
+    if cmd == "run":
+        return run(request.get("code") or "", request.get("label") or "Agent edit",
+                   request.get("undo", True))
     return {"ok": False, "error": f"unknown cmd {cmd!r}"}
 
 

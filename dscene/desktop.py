@@ -5,7 +5,7 @@ the user's own windows, restored by their adapters (adapters/blender.py, impress
 window.py). A deck preloads its browser tabs, so swapping scenes is only tab activation.
 """
 from dscene.adapters import APP_ADAPTERS, adapter_for
-from dscene.adapters.base import sh
+from dscene.adapters.base import frame_rect, sh
 from dscene.adapters.browser import ChromeSlot, set_scroll
 from dscene.spec import BROWSER_KINDS, Pane, SceneSpec, layout_rects
 
@@ -142,8 +142,9 @@ def list_windows(current_workspace=False):
             continue
         res_class = wm_class.strip().split(".")[-1]  # wmctrl pads the column
         state = sh("xprop", "-id", win_id, "_NET_WM_STATE")
+        rect = frame_rect(win_id) or [int(x), int(y), int(w), int(h)]
         out.append({"id": win_id, "app": res_class, "title": title,
-                    "rect": [int(x), int(y), int(w), int(h)], "workspace": int(workspace),
+                    "rect": rect, "workspace": int(workspace),
                     "minimized": "_NET_WM_STATE_HIDDEN" in state,
                     "maximized": "_NET_WM_STATE_MAXIMIZED_VERT" in state and "_NET_WM_STATE_MAXIMIZED_HORZ" in state,
                     "ours": res_class.lower().startswith("agentbar"),

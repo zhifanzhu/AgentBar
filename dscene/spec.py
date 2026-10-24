@@ -47,6 +47,8 @@ class Pane(BaseModel):
     lon: float | None = Field(None, description="map: longitude")
     label: str | None = Field(None, description="map: the place's name")
     query: str | None = Field(None, description="search: what to search for")
+    engine: Literal["google", "duckduckgo", "bing", "chatgpt", "perplexity"] | None = Field(
+        None, description="search: where to search; defaults to the user's chosen answer engine")
     # blender
     blend: str | None = Field(None, description="blender: a .blend checkpoint to open (from "
                                                 "capture_scene); omit to keep the current file")
@@ -77,7 +79,7 @@ class Pane(BaseModel):
                 return (f"https://www.openstreetmap.org/?mlat={self.lat}&mlon={self.lon}"
                         f"#map=17/{self.lat}/{self.lon}")
             return "https://www.openstreetmap.org/search?query=" + urllib.parse.quote(self.label or "")
-        return search_url(self.query or self.label or self.url or "")
+        return search_url(self.query or self.label or self.url or "", self.engine)
 
 
 class SceneSpec(BaseModel):
@@ -111,8 +113,17 @@ class SceneSpec(BaseModel):
         return [p.resolve() for p in self.browser_panes()]
 
 
-def search_url(text):
-    return "https://duckduckgo.com/?q=" + urllib.parse.quote(text)
+ENGINES = {"google": "https://www.google.com/search?hl=en&q=", "duckduckgo": "https://duckduckgo.com/?q=",
+           "bing": "https://www.bing.com/search?q=", "chatgpt": "https://chatgpt.com/?q=",
+           "perplexity": "https://www.perplexity.ai/search?q="}
+
+
+def search_url(text, engine=None):
+    """A search (or ask) URL for text, on engine or the user's configured answer engine."""
+    if engine is None:
+        import brain  # late import: the setting lives in the brain config
+        engine = brain.load_config().get("answer_engine", "duckduckgo")
+    return ENGINES.get(engine, ENGINES["google"]) + urllib.parse.quote(text)
 
 
 def layout_rects(scene, area):
