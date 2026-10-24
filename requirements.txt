@@ -1,0 +1,6 @@
+# Python packages not provided by the system (install into a venv created with
+# --system-site-packages, so GTK's gi/cairo bindings and LibreOffice's uno come from the OS).
+mcp>=2.3,<3          # dscene's MCP server and the brain's MCP client (2.x API: MCPServer)
+pydantic>=2          # dscene scene/pane specs
+websocket-client>=1.9  # Chrome DevTools Protocol for the agent's browser windows
+pillow>=10           # checkpoint thumbnails in recordings
