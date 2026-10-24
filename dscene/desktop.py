@@ -37,7 +37,7 @@ class Desktop:
             slot.start()
         old = {t for tabs in self.tabs for t in tabs}  # the previous deck's tabs, if still the agent's
         stale = {slot.role: [t for t in slot.agent_tabs() if t in old] for slot in used}
-        self.tabs = [[used[j].open(url) for j, url in enumerate(s.urls())] for s in scenes]
+        self.tabs = [[used[j].open(url, deck=True) for j, url in enumerate(s.urls())] for s in scenes]
         self.scenes = scenes
         for slot in self.slots:
             for target_id in stale.get(slot.role, []):
@@ -137,10 +137,10 @@ class Desktop:
         return SceneSpec(name=name, layout="free", panes=panes) if panes else None  # None: empty desktop
 
     def close_deck(self, final=False):
-        """Drop the deck and close the tabs the agent opened that the user hasn't taken up
-        (answers, decks from before a restart; see ChromeSlot.agent_tabs). The user's own tabs
-        always stay. Unless final, the agent's tabs on screen stay too: the user may be looking
-        at them, and a second close (final) takes them. A window left with only blank tabs is
+        """Drop the deck and close its tabs, and those of decks from before a restart, that
+        the user hasn't taken up (see ChromeSlot.agent_tabs). The user's own tabs and pages
+        from ordinary requests always stay. Unless final, deck tabs on screen stay too: the
+        user may be looking at them, and a second close (final) takes them. A window left with only blank tabs is
         hidden; one with the user's tabs shows their last tab, back where it was before the deck.
         Returns the titles of the tabs kept on screen."""
         kept_titles = []

@@ -46,8 +46,17 @@ DSCENE_URL = "http://127.0.0.1:8765/mcp"
 THINKING_FALLBACK = {}  # model -> level it needs instead of the configured one (learned once)
 # Tools that do the user's task for them; /show (teaching mode) refuses them.
 DOES_IT_FOR_USER = {"blender_run", "insert_image_to_slides"}
-TEACH = ("[Teaching mode] Show me how, step by step with guide_step, so I do it myself. "
-         "Don't do it for me.")
+MODES = {  # bar commands that put one request in a mode: the note the model gets with it
+    "teach": "[Teaching mode] Show me how, step by step with guide_step, so I do it myself. "
+             "Don't do it for me.",
+    "deck": "[Deck mode] Compare options: research, then call set_deck with 2-5 scenes, one per "
+            "option.",
+}
+DECK_TOOLS = {"set_deck", "save_deck", "swap_scene"}  # offered to the model only in deck mode (/deck)
+# Requests that sound like they want options to pick from: outside deck mode, the reply
+# mentions /deck.
+WANTS_OPTIONS = re.compile(r"\b(options|alternatives|suggest\w*|recommend\w*|compare|which (one|is best)|"
+                           r"best \w+s|top \d+|show me \d+|\d+ (options|ideas|places|routes|ones))\b", re.I)
 
 # Tools that change what's on screen: each is followed by a checkpoint in the trajectory.
 CHANGES_DESKTOP = {"set_scene", "set_deck", "swap_scene", "guide_step", "insert_image_to_slides",
@@ -224,18 +233,21 @@ class Agent:
         self.history = []        # Gemini conversation (Interactions steps), kept here
         self.messages = []       # OpenAI-compatible history, kept here
         self.pending = None      # a checkpoint being captured while the model thinks
-        self.teach = False       # /show: guide only, never do the task for the user
+        self.mode = "auto"       # or "teach" (/show) or "deck" (/deck), for the current request
+        self.screens_set = 0
 
-    def run(self, text, cfg=None, teach=False):
+    def run(self, text, cfg=None, mode="auto"):
         """Handle one request; returns the model's final reply. Blocking. Recorded as a run.
-        teach (the /show command): guide the user step by step and never change the app."""
+        mode: "auto"; "teach" (/show: guide step by step, never change the app); "deck"
+        (/deck: compare options as a deck; the only mode where the model may make decks)."""
         cfg = cfg or load_config()
         RECORDER.start(text, provider=cfg["provider"], model=cfg["models"][cfg["provider"]],
-                       continues_conversation=bool(self.history or self.messages),
-                       mode="teach" if teach else "auto")
-        self.teach = teach
-        if teach:
-            text = f"{TEACH}\n\n{text}"
+                       continues_conversation=bool(self.history or self.messages), mode=mode)
+        self.mode = mode
+        self.screens_set = 0  # successful set_scene calls in this request
+        request = text
+        if mode in MODES:
+            text = f"{MODES[mode]}\n\n{text}"
         try:
             reply = asyncio.run(self._run(text, cfg))
         except Exception as e:
@@ -243,6 +255,8 @@ class Agent:
                 e = e.exceptions[0]
             RECORDER.end(error=f"{type(e).__name__}: {e}")
             raise BrainError(f"{type(e).__name__}: {e}") from e
+        if mode == "auto" and WANTS_OPTIONS.search(request) and reply and "/deck" not in reply:
+            reply = f"{reply} · /deck to compare options"
         RECORDER.end(reply=reply)
         return reply
 
@@ -254,7 +268,8 @@ class Agent:
             await self._checkpoint(dscene, "start")
             tools = [{"name": t.name, "description": t.description or "",
                       "parameters": plain_schema(t.input_schema)}
-                     for t in (await dscene.list_tools()).tools]
+                     for t in (await dscene.list_tools()).tools
+                     if self.mode == "deck" or t.name not in DECK_TOOLS]
             loop = self._gemini if cfg["provider"] == "gemini" else self._openai
             try:
                 return await loop(cfg, text, tools, dscene)
@@ -286,7 +301,15 @@ class Agent:
         """Run one dscene tool; returns (text, images). Desktop changes get a checkpoint,
         captured while the model thinks about its next step."""
         await self._settle()
-        if self.teach and name in DOES_IT_FOR_USER and args.get("changes", True):
+        if self.mode != "deck" and name in DECK_TOOLS:  # e.g. remembered from a /deck request
+            RECORDER.op("agent", name, args=args, seconds=0, result="refused: not a /deck request")
+            return "ERROR: decks are only for /deck requests. Open one search page instead " \
+                   "(set_scene with a search pane).", []
+        if self.mode != "deck" and name == "set_scene" and self.screens_set:
+            RECORDER.op("agent", name, args=args, seconds=0, result="refused: one screen per request")
+            return "ERROR: the screen is already set up for this request: reply now. Several " \
+                   "options side by side are a deck, which the user asks for with /deck.", []
+        if self.mode == "teach" and name in DOES_IT_FOR_USER and args.get("changes", True):
             RECORDER.op("agent", name, args=args, seconds=0, result="refused: teaching mode")
             return "ERROR: the user asked to be shown how (/show): don't do it for them. " \
                    "Guide them with guide_step, one step at a time.", []
@@ -303,6 +326,8 @@ class Agent:
                     images=[RECORDER.image(data, mime) for mime, data in images])
         if name in CHANGES_DESKTOP and not text.startswith("ERROR"):
             self.pending = asyncio.create_task(self._checkpoint(dscene, f"after:{name}", RECORDER.reserve()))
+            if name == "set_scene":
+                self.screens_set += 1
         return text, images
 
     def _model_call(self, url, body, headers=None, step=0):

@@ -4,10 +4,10 @@ Runs inside the bar process, in a background thread, serving MCP over HTTP at
 http://127.0.0.1:8765/mcp. Tools that touch GTK are run on the GTK main loop;
 slow work (Chrome, Blender, LibreOffice, the grounding model) runs in worker threads.
 
-Core tools (18):
+Core tools (19):
   scene  get_scene, set_scene, capture_scene, set_deck, swap_scene, save_deck
   guide  annotate (incl. toasts), clear_annotations, guide_step
-  look   get_screen, find_element, read_terminal
+  look   get_screen, find_element, read_terminal, get_selection
   user   ask_user, select_region
   app    insert_image_to_slides, blender_run, open_terminal, copy_text
 There is deliberately no click/type tool: app state is set through app APIs (each change
@@ -261,6 +261,14 @@ def build(bar):
             return Image(data=await asyncio.to_thread(browser.tab_screenshot, slot.port, tab), format="jpeg")
         jpeg = await _on_gtk(bar.screenshot_window, window)
         return Image(data=jpeg, format="jpeg")
+
+    @server.tool()
+    async def get_selection() -> dict:
+        """The text the user has selected, in any app (terminal, PDF viewer, browser, ...),
+        from the X primary selection. Returns {"text", "age_s"}: seconds since they selected
+        it; text is null when nothing was selected in the last two minutes. Use it when they
+        say "this", "the selected text", "what I highlighted"."""
+        return await _on_gtk_later(bar.read_selection, timeout=5)
 
     @server.tool()
     async def read_terminal(window: str | None = None, lines: int = 60) -> dict:

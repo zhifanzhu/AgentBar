@@ -34,7 +34,9 @@ from overlay import AnnotationLayer, Caption  # noqa: E402
 from selector import RegionSelector  # noqa: E402
 
 CAPTURES = Path.home() / ".cache" / "agentbar" / "captures"
-HELP = ("/show me how to … — step-by-step guidance; the agent won't do it for you · "
+HELP = ("? — search the text you selected (any app) · /search [WORDS] — search the selection or WORDS · "
+        "/deck … — compare options as cards to flip through · "
+        "/show me how to … — step-by-step guidance; the agent won't do it for you · "
         "/model — show the brain · /model gemini|local [MODEL] — switch · /models — list models · "
         "/key gemini KEY — save API key · /ground holo|gemini — who finds elements on screen · "
         "/answers google|duckduckgo|bing|chatgpt|perplexity — where questions open · "
@@ -87,6 +89,9 @@ class AgentBar(Gtk.ApplicationWindow):
         self.pending_ask = None  # done() callback while ask_user waits for an answer
         self.quick_answer = None  # what F4 answers while that question waits (guide steps)
         self.close_armed = False  # a /close kept pages on screen: the next one closes them
+        self.selected_at = 0.0  # when the user last selected text anywhere (X primary selection)
+        Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY).connect(
+            "owner-change", lambda *_: setattr(self, "selected_at", time.time()))
         self.asked_at = 0.0
         self.agent = brain.Agent(on_event=lambda line: GLib.idle_add(self._progress, line))
 
@@ -119,7 +124,7 @@ class AgentBar(Gtk.ApplicationWindow):
         self.connect("focus-out-event", self.on_focus_out)
         self.connect("show", lambda *_: self.dock())
 
-    PLACEHOLDER = "Ask the agent…  (try: hotels near King's Cross under £150 · /help)"
+    PLACEHOLDER = "Ask the agent…  (try: /deck hotels near King's Cross under £150 · /help)"
 
     def dock(self):
         x, y, w, _ = workarea()
@@ -175,13 +180,48 @@ class AgentBar(Gtk.ApplicationWindow):
         self.toast_timer = GLib.timeout_add(seconds * 1000, self._end_toast)
 
     def copy_text(self, text):
-        """Clipboard and middle-click selection; the VNC clipboard passes it on to the viewer."""
-        for selection in (Gdk.SELECTION_CLIPBOARD, Gdk.SELECTION_PRIMARY):
-            clipboard = Gtk.Clipboard.get(selection)
-            clipboard.set_text(text, -1)
-            clipboard.store()
+        """The clipboard (Ctrl+Shift+V); the VNC clipboard passes it on to the viewer. Not the
+        primary selection: that stays what the user selected (? and /search read it)."""
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(text, -1)
+        clipboard.store()
         short = text if len(text) <= 28 else text[:27] + "…"
         self.toast(f"Copied “{GLib.markup_escape_text(short)}” · Ctrl+Shift+V to paste", 4)
+
+    SELECTION_FRESH_S = 120  # older selections are probably not what the user means now
+
+    def read_selection(self, done):
+        """done({"text", "age_s"}) with the text the user selected last (in any app), or
+        {"text": None} when nothing was selected in the last couple of minutes."""
+        age = time.time() - self.selected_at
+        if not self.selected_at or age > self.SELECTION_FRESH_S:
+            done({"text": None, "age_s": None})
+            return
+        Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY).request_text(
+            lambda _c, text: done({"text": " ".join((text or "").split()) or None, "age_s": round(age)}))
+
+    def search(self, words):
+        """? and /search: open a web search for words, or for the selected text (short
+        selections are looked up as "… meaning"). No model call."""
+        RECORDER.op("user", "search", typed=bool(words))
+
+        def go(selection):
+            text = words or selection["text"]
+            if not text:
+                self.status.set_text("Select some text first (or type /search WORDS)")
+                return
+            query = text[:200]
+            if not words and len(query.split()) <= 3:
+                query = f'"{query}" meaning'
+            scene = spec.SceneSpec(name=query[:60], panes=[{"kind": "search", "query": query}])
+            self.status.set_text(f"Searching {query[:80]}…")
+            self.apply_scene(scene, lambda result: self.status.set_text(
+                result.get("error") and f"Search failed: {result['error']}" or f"Searched: {query[:80]}"))
+
+        if words:
+            go({"text": None})
+        else:
+            self.read_selection(go)
 
     def _end_toast(self):
         self.toaster.hide()
@@ -197,9 +237,15 @@ class AgentBar(Gtk.ApplicationWindow):
             return
         if not text:
             return
-        teach = text.lower().startswith("/show ")
-        if teach:  # "/show me how to …": a request, in teaching mode
-            text = text[1:]
+        if text == "?" or text.lower() == "/search" or text.lower().startswith("/search "):
+            entry.set_text("")
+            self.search(text[len("/search"):].strip() if text.lower().startswith("/search") else "")
+            return
+        mode = "auto"
+        if text.lower().startswith("/show "):  # "/show me how to …": a request, in teaching mode
+            mode, text = "teach", text[1:]
+        elif text.lower().startswith("/deck "):  # "/deck hotels near …": options, as a deck
+            mode, text = "deck", text[6:].strip()
         elif text.startswith("/"):
             self.command(text)
             return
@@ -216,12 +262,12 @@ class AgentBar(Gtk.ApplicationWindow):
         self.reply.set_text("")
         self.reply.hide()
         self.status.set_text(f"Thinking… ({brain.describe(cfg)})")
-        threading.Thread(target=self._think, args=(text, cfg, teach), daemon=True).start()
+        threading.Thread(target=self._think, args=(text, cfg, mode), daemon=True).start()
 
-    def _think(self, text, cfg, teach=False):
+    def _think(self, text, cfg, mode="auto"):
         t0 = time.perf_counter()
         try:
-            reply = self.agent.run(text, cfg, teach)
+            reply = self.agent.run(text, cfg, mode)
         except Exception as e:  # noqa: BLE001 - show any failure in the bar
             reply = f"Failed: {e}"
         GLib.idle_add(self._replied, reply, time.perf_counter() - t0, cfg["models"][cfg["provider"]])
@@ -511,9 +557,9 @@ class AgentBar(Gtk.ApplicationWindow):
             self.cards[0].grab_focus()
 
     def close_deck(self):
-        """/close, in two steps when the agent's pages are on screen: the first closes the deck
-        and every agent tab out of sight but keeps what the user is looking at; the next closes
-        that too. The agent never closes the user's tabs (or ones they've taken up)."""
+        """/close, in two steps when deck pages are on screen: the first closes the deck's
+        pages out of sight but keeps what the user is looking at; the next closes that too.
+        Only deck pages: never the user's tabs, nor pages they asked for in other requests."""
         final, self.close_armed = self.close_armed, False
         RECORDER.op("user", "close_deck", scenes=len(self.cards), final=final)
         self.caption.hide()
@@ -527,7 +573,7 @@ class AgentBar(Gtk.ApplicationWindow):
                 kept = self.desktop.close_deck(final)
                 note = (f"Kept “{kept[0][:40]}”{f' and {len(kept) - 1} more' if len(kept) > 1 else ''} "
                         "on screen · /close again to close it" if kept
-                        else "Closed the agent's tabs · yours stay open")
+                        else "Deck closed · your tabs and pages you asked for stay open")
             except Exception as e:  # noqa: BLE001 - show the failure in the bar
                 kept, note = [], f"Closing failed: {e}"
             GLib.idle_add(self._closed, bool(kept), note)

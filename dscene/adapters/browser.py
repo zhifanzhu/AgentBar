@@ -4,9 +4,10 @@ Each slot is its own Chromium instance, so it has its own window that stays put 
 its content changes. Over CDP we open, activate and close tabs, read and set the scroll
 position, and screenshot tabs in the background (even in a minimized window).
 
-The user browses in these windows too, so the agent only ever closes tabs it opened
+The user browses in these windows too, so the agent only ever closes deck tabs it opened
 itself (recorded in ~/.cache/agentbar/agent-tabs.json, which survives a restart of the
-bar) and that still show the site it opened; a tab the user took elsewhere is theirs.
+bar) that the user hasn't taken up. Pages it opened for an ordinary request (answers,
+videos, tutorials) are the user's to keep; see ChromeSlot.agent_tabs.
 """
 import base64
 import json
@@ -185,16 +186,17 @@ class ChromeSlot:
         return [t for t in self._get("/json/list")
                 if t.get("type") == "page" and not t.get("url", "").startswith("chrome://")]
 
-    def open(self, url):
-        """Show url in a tab of the agent's: its blank tab if it has one, else a new tab."""
+    def open(self, url, deck=False):
+        """Show url in a tab of the agent's: its blank tab if it has one, else a new tab.
+        deck: the tab is part of a deck, so /close may close it later."""
         if url != "about:blank":
             blank = next((t["id"] for t in self.pages() if t.get("url") in ("", "about:blank")), None)
             if blank:
-                self.navigate(blank, url)
+                self.navigate(blank, url, deck)
                 return blank
         target_id = self._get("/json/new?" + urllib.parse.quote(url, safe=""), method="PUT")["id"]
         tabs = _agent_tabs()
-        tabs[target_id] = {"url": url, "history": 1}
+        tabs[target_id] = {"url": url, "history": 1, "deck": deck}
         _save_agent_tabs(tabs)
         return target_id
 
@@ -204,22 +206,26 @@ class ChromeSlot:
         if tabs.pop(target_id, None) is not None:
             _save_agent_tabs(tabs)
 
-    def navigate(self, target_id, url):
-        """Load url in one of the agent's tabs (it stays the agent's)."""
+    def navigate(self, target_id, url, deck=None):
+        """Load url in one of the agent's tabs. deck: whether it's now a deck tab (None:
+        unchanged)."""
         try:
             before = js(self.port, target_id, "history.length") or 1
         except Exception:  # noqa: BLE001 - a tab that can't answer yet has just the one entry
             before = 1
         cdp(self.port, target_id, "Page.navigate", {"url": url})
         tabs = _agent_tabs()
-        tabs[target_id] = {"url": url, "history": before + 1}
+        old = tabs.get(target_id)
+        was_deck = isinstance(old, dict) and old.get("deck", False)
+        tabs[target_id] = {"url": url, "history": before + 1, "deck": was_deck if deck is None else deck}
         _save_agent_tabs(tabs)
 
     def agent_tabs(self):
-        """Ids of this window's tabs that are the agent's to close: blank tabs, and ones it
-        opened that the user hasn't taken up. A tab is the user's once they've moved on from
-        the page the agent loaded (its history grew: a click, a search, a video picked), it's
-        playing sound or video, it's on another site, or the agent never opened it."""
+        """Ids of this window's tabs that are the agent's to close: blank tabs, and deck tabs
+        the user hasn't taken up. Never: tabs the agent didn't open, pages it opened for an
+        ordinary request (the user asked to see them), and deck tabs the user has moved on in
+        (history grew: a click, a search, a video picked), took to another site, or that are
+        playing sound or video."""
         opened, mine = _agent_tabs(), []
         for t in self.pages():
             url = t.get("url", "")
@@ -227,10 +233,8 @@ class ChromeSlot:
                 mine.append(t["id"])
                 continue
             record = opened.get(t["id"])
-            if record is None:
-                continue
-            if isinstance(record, str):  # recorded before history counts were kept
-                record = {"url": record, "history": 1}
+            if not isinstance(record, dict) or not record.get("deck"):
+                continue  # not the agent's, or a page the user asked for
             if urllib.parse.urlsplit(url).netloc != urllib.parse.urlsplit(record["url"]).netloc:
                 continue
             try:
