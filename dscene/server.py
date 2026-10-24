@@ -182,6 +182,8 @@ def build(bar):
         only for other apps). Pass it to set_scene later to bring this moment back. Blender
         and Impress states are saved as checkpoint files."""
         scene = await asyncio.to_thread(bar.desktop.capture_scene, name)
+        if scene is None:
+            return {"name": name, "panes": [], "note": "empty desktop: no visible windows"}
         return scene.model_dump(exclude_none=True)
 
     @server.tool()

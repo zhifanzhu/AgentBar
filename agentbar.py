@@ -31,11 +31,9 @@ from dscene.recorder import RECORDER  # noqa: E402
 from overlay import AnnotationLayer, Caption  # noqa: E402
 from selector import RegionSelector  # noqa: E402
 
-HERE = Path(__file__).resolve().parent
 CAPTURES = Path.home() / ".cache" / "agentbar" / "captures"
 HELP = ("/model — show the brain · /model gemini|local [MODEL] — switch · /models — list models · "
-        "/key gemini KEY — save API key · /new — new conversation · /shot — screenshot to slide · "
-        "/demo — offline demo scenes")
+        "/key gemini KEY — save API key · /new — new conversation · /shot — screenshot to slide")
 
 CSS = b"""
 #bar { background: #1c1d24; color: #e8e8ee; }
@@ -200,7 +198,7 @@ class AgentBar(Gtk.ApplicationWindow):
     def command(self, text):
         args = text.split()
         cmd = args[0].lower()
-        RECORDER.event("command", command=cmd)  # never the arguments: /key carries a secret
+        RECORDER.op("user", "command", command=cmd)  # never the arguments: /key carries a secret
         cfg = brain.load_config()
         if cmd == "/model" and len(args) >= 2:
             provider = args[1].lower()
@@ -227,9 +225,6 @@ class AgentBar(Gtk.ApplicationWindow):
             self.status.set_text("New conversation")
         elif cmd == "/shot":
             self.select_region("Drag to select · Esc to cancel", self._shot_selected)
-        elif cmd == "/demo":
-            _, scenes = spec.load_deck(HERE / "decks" / "demo-hotels.json")
-            self.present_deck(scenes, False, lambda _r: None)
         else:
             self.status.set_text(HELP)
         self.entry.set_text("")  # never leave a key sitting in the entry
@@ -297,7 +292,6 @@ class AgentBar(Gtk.ApplicationWindow):
                 self.caption.hide()
             if self.annotations.items:
                 self.annotations.refresh()
-            RECORDER.event("set_scene", name=scene.name, panes=[p.kind for p in scene.panes])
             done(result)
             return False
 
@@ -361,11 +355,10 @@ class AgentBar(Gtk.ApplicationWindow):
             GLib.timeout_add(500, lambda: self.set_focus_on_map(True) or False)
         self.question.show()
         self.options_box.show_all()
-        RECORDER.event("ask", question=question, options=options)
 
     def answer(self, text):
         done, self.pending_ask = self.pending_ask, None
-        RECORDER.event("answer", answer=text, waited=round(time.time() - self.asked_at, 1))
+        RECORDER.op("user", "answer", answer=text, waited=round(time.time() - self.asked_at, 1))
         self.ask_cancel()
         if done:
             self.desktop.refocus()  # hand the keyboard back to the user's app
@@ -429,11 +422,11 @@ class AgentBar(Gtk.ApplicationWindow):
                              f"<small>{GLib.markup_escape_text(s.note)}</small>")
             card.add(label)
             card.get_style_context().add_class("card")
-            card.connect("clicked", lambda _b, i=i: self.go(i))
+            card.connect("clicked", lambda _b, i=i: self.user_go(i))
             self.cards_box.pack_start(card, False, False, 0)
             self.cards.append(card)
         home = Gtk.Button(label="↩ My desktop")
-        home.connect("clicked", lambda _b: self.go(None))
+        home.connect("clicked", lambda _b: self.user_go(None))
         self.cards_box.pack_end(home, False, False, 0)
         self.cards_box.show_all()
         self.status.set_text(f"{self.status.get_text().split(' · preparing')[0]} · "
@@ -441,6 +434,11 @@ class AgentBar(Gtk.ApplicationWindow):
         self.present()  # hiding the preloaded windows can move focus away from us
         if self.cards and not self.pending_ask:
             self.cards[0].grab_focus()
+
+    def user_go(self, i):
+        """The user flipped scenes (card or key): record it, then show."""
+        RECORDER.op("user", "swap_scene", index=i, name=self.desktop.scenes[i].name if i is not None else None)
+        self.go(i)
 
     def go(self, i):
         if i is None:
@@ -458,7 +456,6 @@ class AgentBar(Gtk.ApplicationWindow):
             else:
                 self.caption.hide()
         self.current = i
-        RECORDER.event("scene", index=i, name=self.desktop.scenes[i].name if i is not None else None)
         for j, card in enumerate(self.cards):
             ctx = card.get_style_context()
             (ctx.add_class if j == i else ctx.remove_class)("active")
@@ -474,12 +471,12 @@ class AgentBar(Gtk.ApplicationWindow):
             elif self.current is None:
                 self.dismiss(refocus=True)
             else:
-                self.go(None)
+                self.user_go(None)
             return True
         if self.cards and not self.entry.has_focus() and key in (Gdk.KEY_Left, Gdk.KEY_Right):
             step = 1 if key == Gdk.KEY_Right else -1
             start = -1 if self.current is None and step == 1 else (self.current or 0)
-            self.go((start + step) % len(self.cards))
+            self.user_go((start + step) % len(self.cards))
             return True
         typing = Gdk.keyval_to_unicode(key) >= 32 and not (
             event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK))

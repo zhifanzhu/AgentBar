@@ -12,6 +12,7 @@ Config lives in ~/.config/agentbar/brain.json; edit it by hand or with the bar's
 /model and /key commands. GEMINI_API_KEY in the environment overrides the stored key.
 """
 import asyncio
+import base64
 import json
 import os
 import time
@@ -36,6 +37,8 @@ DEFAULTS = {
 }
 GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 DSCENE_URL = "http://127.0.0.1:8765/mcp"
+# Tools that change what's on screen: each is followed by a checkpoint in the trajectory.
+CHANGES_DESKTOP = {"set_scene", "set_deck", "swap_scene", "guide_step", "insert_image_to_slides"}
 
 SYSTEM = """You are the agent behind the agent bar on the user's Linux desktop (Arch Linux,
 XFCE, one screen). The user types requests into the bar; you act through the dscene tools.
@@ -148,17 +151,6 @@ def _result_parts(result):
     return (f"ERROR: {text}" if failed else text), images
 
 
-def _without_signatures(resp):
-    """The model response minus opaque blobs (thought signatures), for the trajectory log."""
-    def walk(node):
-        if isinstance(node, dict):
-            return {k: ("…" if k == "signature" else walk(v)) for k, v in node.items()}
-        if isinstance(node, list):
-            return [walk(n) for n in node]
-        return node
-    return walk(resp)
-
-
 class Agent:
     """One conversation with the configured model, acting through dscene."""
 
@@ -169,6 +161,7 @@ class Agent:
     def reset(self):
         self.previous_id = None  # Gemini keeps the history server-side
         self.messages = []       # OpenAI-compatible history, kept here
+        self.pending = None      # a checkpoint being captured while the model thinks
 
     def run(self, text, cfg=None):
         """Handle one request; returns the model's final reply. Blocking. Recorded as a run."""
@@ -189,7 +182,8 @@ class Agent:
         from mcp import Client  # imported lazily: only the brain thread needs it
 
         async with Client(DSCENE_URL) as dscene:
-            await self._snapshot(dscene, "before")
+            self.pending = None
+            await self._checkpoint(dscene, "start")
             tools = [{"name": t.name, "description": t.description or "",
                       "parameters": plain_schema(t.input_schema)}
                      for t in (await dscene.list_tools()).tools]
@@ -197,20 +191,33 @@ class Agent:
             try:
                 return await loop(cfg, text, tools, dscene)
             finally:
-                await self._snapshot(dscene, "after")
+                await self._settle()
+                await self._checkpoint(dscene, "end")
 
-    async def _snapshot(self, dscene, when):
-        """Record the desktop (windows, bar state, a screenshot) without showing it to the model."""
+    async def _checkpoint(self, dscene, trigger, seq=None):
+        """Record a restorable scene + thumbnail of the desktop; the model never sees it."""
+        scene = jpeg = error = None
         try:
-            state = json.loads(_result_parts(await dscene.call_tool("get_scene", {}))[0])
+            scene = json.loads(_result_parts(await dscene.call_tool("capture_scene", {"name": trigger}))[0])
+        except Exception as e:  # noqa: BLE001 - e.g. nothing visible to capture
+            error = str(e)
+        try:
             _, shots = _result_parts(await dscene.call_tool("get_screen", {}))
-            RECORDER.event("snapshot", when=when, windows=state.pop("windows", []), state=state,
-                           screenshot=RECORDER.image(shots[0][1], shots[0][0]) if shots else None)
-        except Exception as e:  # noqa: BLE001 - recording must never break a request
-            RECORDER.event("snapshot_failed", when=when, error=str(e))
+            jpeg = base64.b64decode(shots[0][1]) if shots else None
+        except Exception:  # noqa: BLE001 - recording must never break a request
+            pass
+        RECORDER.checkpoint(trigger, scene, jpeg, error, seq)
+
+    async def _settle(self):
+        """Wait for a checkpoint still being captured, so it never mixes in the next op."""
+        if self.pending:
+            await asyncio.gather(self.pending, return_exceptions=True)
+            self.pending = None
 
     async def _call(self, dscene, name, args):
-        """Run one dscene tool; returns (text, images)."""
+        """Run one dscene tool; returns (text, images). Desktop changes get a checkpoint,
+        captured while the model thinks about its next step."""
+        await self._settle()
         self.on_event(f"→ {name}")
         print(f"[agent] {name} {json.dumps(args)[:300]}", flush=True)
         t0 = time.perf_counter()
@@ -220,16 +227,28 @@ class Agent:
             text, images = f"ERROR: {e}", []
         seconds = round(time.perf_counter() - t0, 3)
         print(f"[agent]   = {text[:300]}{f' + {len(images)} image(s)' if images else ''} ({seconds}s)", flush=True)
-        RECORDER.event("tool", name=name, args=args, seconds=seconds, result=text[:4000],
-                       images=[RECORDER.image(data, mime) for mime, data in images])
+        RECORDER.op("agent", name, args=args, seconds=seconds, result=text[:4000],
+                    images=[RECORDER.image(data, mime) for mime, data in images])
+        if name in CHANGES_DESKTOP and not text.startswith("ERROR"):
+            self.pending = asyncio.create_task(self._checkpoint(dscene, f"after:{name}", RECORDER.reserve()))
         return text, images
 
     def _model_call(self, url, body, headers=None, step=0):
-        """One request to the model, timed and recorded (without the images it was sent)."""
+        """One request to the model, timed and recorded as a "think" op: what it decided."""
         t0 = time.perf_counter()
         resp = _http(url, body, headers)
-        RECORDER.event("model", step=step, seconds=round(time.perf_counter() - t0, 3),
-                       usage=resp.get("usage"), response=_without_signatures(resp))
+        if "steps" in resp:  # Gemini
+            steps = resp["steps"]
+            calls = [s.get("name") for s in steps if s.get("type") == "function_call"]
+            text = " ".join(c.get("text", "") for s in steps if s.get("type") == "model_output"
+                            for c in s.get("content", []) if c.get("type") == "text")
+            searched = any(s.get("type") == "google_search_call" for s in steps)
+        else:  # OpenAI-compatible
+            msg = resp["choices"][0]["message"]
+            calls = [c["function"]["name"] for c in msg.get("tool_calls") or []]
+            text, searched = msg.get("content") or "", False
+        RECORDER.op("model", "think", step=step, seconds=round(time.perf_counter() - t0, 3),
+                    usage=resp.get("usage"), calls=calls, searched=searched, text=text[:1000])
         return resp
 
     async def _gemini(self, cfg, text, tools, dscene):
@@ -251,7 +270,7 @@ class Agent:
                 if "thinking" not in str(e).lower() or level == "low":
                     raise
                 level = body["generation_config"]["thinking_level"] = "low"  # model lacks this level
-                RECORDER.event("thinking_fallback", error=str(e))
+                RECORDER.op("model", "thinking_fallback", error=str(e))
                 resp = await asyncio.to_thread(self._model_call, f"{GEMINI}/interactions", body,
                                                {"x-goog-api-key": key}, step)
             self.previous_id = resp.get("id")

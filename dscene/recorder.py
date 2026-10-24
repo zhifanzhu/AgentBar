@@ -1,13 +1,21 @@
-"""Trajectory recorder: what the agent and the user did, saved lightly for later analysis.
+"""Trajectory recorder: each request as checkpoint -> op -> ... -> checkpoint, on disk.
 
-Each request becomes a run:
-  runs/<date>/<time>-<slug>/events.jsonl   one JSON object per line: t (s since start), type, ...
-  runs/<date>/<time>-<slug>/img-NNN.jpg    screenshots, as the agent saw them
-Bar events outside a run (flipping scenes, summoning the bar) go to runs/<date>/ui.jsonl.
+  runs/<date>/<time>-<slug>/trajectory.jsonl   one JSON object per line, in `seq` order of
+                                               creation (a checkpoint can be written after
+                                               the next op, while it was being captured)
+  runs/<date>/<time>-<slug>/cN.jpg             checkpoint thumbnails
+  runs/<date>/<time>-<slug>/img-NNN.jpg        screenshots the agent saw
 
+A checkpoint holds a full, restorable scene (dscene capture_scene): set_scene brings that
+moment back. An op is an agent tool call, a model "think" step, or a user action:
+  {"seq", "t", "type": "checkpoint", "id": "c2", "trigger": "after:set_deck", "scene", "thumbnail"}
+  {"seq", "t", "type": "op", "actor": "agent" | "model" | "user", "name", ...}
+User actions outside a request (flipping scenes, commands) go to runs/<date>/ui.jsonl.
 runs/ is inside the shared ~/proj folder, so it can be read from the host too.
 """
 import base64
+import io
+import itertools
 import json
 import re
 import threading
@@ -15,6 +23,20 @@ import time
 from pathlib import Path
 
 RUNS = Path(__file__).resolve().parents[1] / "runs"
+THUMB_WIDTH = 480
+
+
+def thumbnail(jpeg_bytes):
+    """A small JPEG of a screenshot (about 20 KB)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return jpeg_bytes
+    im = Image.open(io.BytesIO(jpeg_bytes))
+    im.thumbnail((THUMB_WIDTH, THUMB_WIDTH))
+    out = io.BytesIO()
+    im.convert("RGB").save(out, "JPEG", quality=70)
+    return out.getvalue()
 
 
 class Recorder:
@@ -22,7 +44,9 @@ class Recorder:
         self.lock = threading.Lock()
         self.run_dir = None
         self.t0 = 0.0
+        self.seq = itertools.count()
         self.images = 0
+        self.checkpoints = 0
 
     def start(self, request, **fields):
         """Begin a run for one request; returns its directory."""
@@ -31,22 +55,48 @@ class Recorder:
             self.run_dir = RUNS / time.strftime("%Y-%m-%d") / f"{time.strftime('%H%M%S')}-{slug}"
             self.run_dir.mkdir(parents=True, exist_ok=True)
             self.t0 = time.time()
-            self.images = 0
-        self.event("request", text=request, **fields)
+            self.seq = itertools.count()
+            self.images = self.checkpoints = 0
+        self.op("user", "request", text=request, **fields)
         return self.run_dir
 
-    def event(self, kind, **fields):
+    def reserve(self):
+        """A sequence number for a record that will be written later (e.g. a checkpoint)."""
+        return next(self.seq)
+
+    def _write(self, record, seq=None):
         with self.lock:
             if self.run_dir:
-                path, t = self.run_dir / "events.jsonl", round(time.time() - self.t0, 3)
+                path = self.run_dir / "trajectory.jsonl"
+                record = {"seq": next(self.seq) if seq is None else seq,
+                          "t": round(time.time() - self.t0, 3), **record}
             else:
-                path, t = RUNS / time.strftime("%Y-%m-%d") / "ui.jsonl", time.strftime("%H:%M:%S")
+                path = RUNS / time.strftime("%Y-%m-%d") / "ui.jsonl"
                 path.parent.mkdir(parents=True, exist_ok=True)
+                record = {"t": time.strftime("%H:%M:%S"), **record}
             with path.open("a") as f:
-                f.write(json.dumps({"t": t, "type": kind, **fields}, ensure_ascii=False, default=str) + "\n")
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+    def op(self, actor, name, **fields):
+        self._write({"type": "op", "actor": actor, "name": name, **fields})
+
+    def checkpoint(self, trigger, scene=None, screenshot=None, error=None, seq=None):
+        """Record a restorable scene (from capture_scene) and a thumbnail; returns its id."""
+        with self.lock:
+            if not self.run_dir:
+                return None
+            cid = f"c{self.checkpoints}"
+            self.checkpoints += 1
+            thumb = None
+            if screenshot:
+                thumb = f"{cid}.jpg"
+                (self.run_dir / thumb).write_bytes(thumbnail(screenshot))
+        self._write({"type": "checkpoint", "id": cid, "trigger": trigger, "scene": scene,
+                     "thumbnail": thumb, **({"error": error} if error else {})}, seq)
+        return cid
 
     def image(self, data, mime="image/jpeg"):
-        """Save an image (bytes or base64 text) into the run; returns its file name, or None."""
+        """Save an image the agent saw (bytes or base64 text); returns its file name, or None."""
         with self.lock:
             if not self.run_dir:
                 return None
@@ -57,7 +107,7 @@ class Recorder:
             return name
 
     def end(self, **fields):
-        self.event("end", seconds=round(time.time() - self.t0, 2), **fields)
+        self.op("agent", "end", seconds=round(time.time() - self.t0, 2), **fields)
         with self.lock:
             self.run_dir = None
 

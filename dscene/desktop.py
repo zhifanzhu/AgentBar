@@ -102,9 +102,7 @@ class Desktop:
                 pane = APP_ADAPTERS["window"].capture(win)
             pane.maximized = win["maximized"] or None
             panes.append(pane)
-        if not panes:
-            raise ValueError("nothing visible to capture")
-        return SceneSpec(name=name, layout="free", panes=panes)
+        return SceneSpec(name=name, layout="free", panes=panes) if panes else None  # None: empty desktop
 
     def restore(self):
         """Back to the user's own desktop: hide the scene windows."""
