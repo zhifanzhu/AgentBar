@@ -490,7 +490,7 @@ class AgentBar(Gtk.ApplicationWindow):
 
     def user_go(self, i):
         """The user flipped scenes (card or key): record it, then show."""
-        RECORDER.op("user", "swap_scene", index=i, name=self.desktop.scenes[i].name if i is not None else None)
+        RECORDER.op("user", "swap_scene", index=i, scene=self.desktop.scenes[i].name if i is not None else None)
         self.go(i)
 
     def go(self, i):

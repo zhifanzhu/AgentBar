@@ -60,7 +60,9 @@ Show, don't tell: change what's on screen rather than writing long answers.
   tall", prices, scores): don't answer in text and don't search yourself. Call set_scene once
   with {"name": <short title>, "panes": [{"kind": "search", "query": <the question>}]} and
   "look": false, so the answer opens in the browser. Then reply with one short line, e.g.
-  "Opened: weather in London".
+  "Opened: weather in London". The query is plain words, as a person would type them: no
+  operators like site: or quotes. When you already have the exact page (a real URL from your
+  search results or the conversation), open it instead: a pane of kind "url" with that URL.
 
 - Comparing options (hotels, restaurants, products, papers): research first (Google Search),
   then call set_deck with one scene per option, 2-5 scenes. For places use two panes: the
@@ -192,13 +194,15 @@ def _stopped(name, text):
 
 
 def _opened_answer(calls, results):
-    """The scene name if this step only opened a search page (the answer lane), else None."""
+    """The scene name if this step only opened a search or web page (the answer lane), else None."""
     if len(calls) != 1 or calls[0]["name"] != "set_scene":
         return None
     scene = (calls[0].get("arguments") or {}).get("scene") or {}
     panes = scene.get("panes") or []
-    if not panes or any(p.get("kind") != "search" for p in panes):
+    if not panes or any(p.get("kind") not in ("search", "url") for p in panes):
         return None
+    if any(p.get("kind") == "url" for p in panes) and calls[0]["arguments"].get("look", True):
+        return None  # the model wants to see the page: let it
     if results[0]["result"][0]["text"].startswith("ERROR"):
         return None
     return scene.get("name") or panes[0].get("query") or "search"

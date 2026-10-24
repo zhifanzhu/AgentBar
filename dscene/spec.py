@@ -16,6 +16,7 @@ descriptor: the fields needed to bring that window back. `fidelity` (set when a
 scene is captured) says how much comes back: exact, view, or layout only.
 """
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -113,7 +114,7 @@ class SceneSpec(BaseModel):
         return [p.resolve() for p in self.browser_panes()]
 
 
-ENGINES = {"google": "https://www.google.com/search?hl=en&q=", "duckduckgo": "https://duckduckgo.com/?q=",
+ENGINES = {"google": "https://www.google.com/search?hl=en&q=", "duckduckgo": "https://duckduckgo.com/?kl=uk-en&q=",
            "bing": "https://www.bing.com/search?q=", "chatgpt": "https://chatgpt.com/?q=",
            "perplexity": "https://www.perplexity.ai/search?q="}
 
@@ -123,7 +124,10 @@ def search_url(text, engine=None):
     if engine is None:
         import brain  # late import: the setting lives in the brain config
         engine = brain.load_config().get("answer_engine", "duckduckgo")
-    return ENGINES.get(engine, ENGINES["google"]) + urllib.parse.quote(text)
+    # site: takes a domain only; "site:lu.ma/encode-club x" matches nothing, so keep the
+    # path as plain words: "site:lu.ma encode-club x".
+    text = re.sub(r"\bsite:([^\s/]+)/(\S*)", lambda m: f"site:{m[1]} {m[2].replace('/', ' ')}", text)
+    return ENGINES.get(engine, ENGINES["google"]) + urllib.parse.quote(text.strip())
 
 
 def layout_rects(scene, area):
