@@ -39,7 +39,7 @@ HELP = ("/show me how to … — step-by-step guidance; the agent won't do it fo
         "/key gemini KEY — save API key · /ground holo|gemini — who finds elements on screen · "
         "/answers google|duckduckgo|bing|chatgpt|perplexity — where questions open · "
         "/remember TEXT — note about you, sent with every request · "
-        "/new — new conversation · /shot — screenshot to slide")
+        "/close — close the deck · /new — new conversation · /shot — screenshot to slide")
 
 CSS = b"""
 #bar { background: #1c1d24; color: #e8e8ee; }
@@ -167,7 +167,10 @@ class AgentBar(Gtk.ApplicationWindow):
         if self.toast_timer:
             GLib.source_remove(self.toast_timer)
         _, y, _, h = workarea()
-        self.toaster.show_centered(markup, y + h - 40)
+        bottom = y + h - 40
+        if self.caption.get_visible():  # a scene caption is down there: go just above it
+            bottom = min(bottom, self.caption.get_position()[1] - 10)
+        self.toaster.show_centered(markup, bottom)
         self.toast_timer = GLib.timeout_add(seconds * 1000, self._end_toast)
 
     def copy_text(self, text):
@@ -276,6 +279,8 @@ class AgentBar(Gtk.ApplicationWindow):
             self.status.set_text(f"Remembered · {brain.USER_NOTES}")
         elif cmd == "/remember":
             self.status.set_text(f"/remember TEXT adds a line to {brain.USER_NOTES}")
+        elif cmd == "/close":
+            self.close_deck()
         elif cmd == "/new":
             self.agent.reset()
             self.status.set_text("New conversation")
@@ -343,7 +348,7 @@ class AgentBar(Gtk.ApplicationWindow):
             if scene.caption and self.desktop.rects:
                 x, y, w, h = self.desktop.rects[-1]
                 self.caption.show_at(f"{GLib.markup_escape_text(scene.name)}\n<span size='small'>"
-                                     f"{GLib.markup_escape_text(scene.caption)}</span>", x + 24, y + h - 24)
+                                     f"{GLib.markup_escape_text(scene.caption)}</span>", x + 24, y + h - 24, w - 48)
             else:
                 self.caption.hide()
             if self.annotations.items:
@@ -382,6 +387,7 @@ class AgentBar(Gtk.ApplicationWindow):
         self.show_cards(scenes, took)
         if show_first:
             self.go(0)
+        self._check_links()
         done({"deck": [{"index": i, "name": s.name, "note": s.note} for i, s in enumerate(scenes)],
               "showing": self.current, "links_replaced_by_search": swapped})
 
@@ -486,8 +492,7 @@ class AgentBar(Gtk.ApplicationWindow):
         for i, s in enumerate(scenes):
             card = Gtk.Button()
             label = Gtk.Label()
-            label.set_markup(f"<b>{GLib.markup_escape_text(s.name)}</b>\n"
-                             f"<small>{GLib.markup_escape_text(s.note)}</small>")
+            label.set_markup(self._card_markup(s))
             card.add(label)
             card.get_style_context().add_class("card")
             card.connect("clicked", lambda _b, i=i: self.user_go(i))
@@ -502,6 +507,61 @@ class AgentBar(Gtk.ApplicationWindow):
         self.present()  # hiding the preloaded windows can move focus away from us
         if self.cards and not self.pending_ask:
             self.cards[0].grab_focus()
+
+    def close_deck(self):
+        """/close, in two steps when a card is showing: the first closes the rest of the deck
+        but keeps the card the user is looking at; the next closes that too. The agent only
+        closes tabs it opened, never the user's own."""
+        keep = self.current if self.cards else None
+        name = self.desktop.scenes[keep].name if keep is not None else None
+        RECORDER.op("user", "close_deck", scenes=len(self.cards), kept=name)
+        self.caption.hide()
+        for child in self.cards_box.get_children():
+            child.destroy()
+        self.cards, self.current = [], None
+        self.status.set_text("Closing…")
+
+        def work():
+            try:
+                self.desktop.close_deck(keep)
+                note = (f"Kept “{name}” open · /close again to close it" if name
+                        else "Closed the agent's tabs · yours stay open")
+            except Exception as e:  # noqa: BLE001 - show the failure in the bar
+                note = f"Closing failed: {e}"
+            GLib.idle_add(self.status.set_text, note)
+            if not name:
+                GLib.idle_add(self.desktop.refocus)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _card_markup(scene):
+        return (f"<b>{GLib.markup_escape_text(scene.name)}</b>\n"
+                f"<small>{GLib.markup_escape_text(scene.note)}</small>")
+
+    def _check_links(self):
+        """In the background, once the deck's pages have loaded: swap pages that don't exist
+        for a site search, and say so on their cards."""
+        scenes = self.desktop.scenes
+
+        def work():
+            try:
+                changed = self.desktop.fix_dead_links()
+            except Exception as e:  # noqa: BLE001 - a failed check just leaves the pages as they are
+                print("link check failed:", e, flush=True)
+                return
+            if changed:
+                GLib.idle_add(self._links_fixed, scenes, changed)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _links_fixed(self, scenes, changed):
+        if self.desktop.scenes is not scenes:
+            return False  # another deck since
+        RECORDER.op("agent", "dead_links_replaced", scenes=[scenes[i].name for i in changed])
+        for i in changed:
+            self.cards[i].get_child().set_markup(self._card_markup(scenes[i]))
+        return False
 
     def user_go(self, i):
         """The user flipped scenes (card or key): record it, then show."""
@@ -520,7 +580,7 @@ class AgentBar(Gtk.ApplicationWindow):
                 x, y, w, h = rects[-1]
                 self.caption.show_at(f"{GLib.markup_escape_text(s.name)}\n"
                                      f"<span size='small'>{GLib.markup_escape_text(text)}</span>",
-                                     x + 24, y + h - 24)
+                                     x + 24, y + h - 24, w - 48)
             else:
                 self.caption.hide()
         self.current = i

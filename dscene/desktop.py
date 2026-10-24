@@ -4,10 +4,13 @@ Browser panes go into the agent's Chromium slots (adapters/browser.py); app pane
 the user's own windows, restored by their adapters (adapters/blender.py, impress.py,
 window.py). A deck preloads its browser tabs, so swapping scenes is only tab activation.
 """
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+
 from dscene.adapters import APP_ADAPTERS, adapter_for
 from dscene.adapters.base import frame_rect, sh
-from dscene.adapters.browser import ChromeSlot, set_scroll
-from dscene.spec import BROWSER_KINDS, Pane, SceneSpec, layout_rects
+from dscene.adapters.browser import ChromeSlot, page_is_dead, set_scroll
+from dscene.spec import BROWSER_KINDS, Pane, SceneSpec, layout_rects, search_url
 
 MAX_PANES = 3
 FIRST_PORT = 9230
@@ -28,14 +31,43 @@ class Desktop:
         if len(used) > MAX_PANES:
             raise ValueError(f"at most {MAX_PANES} browser panes per scene")
         for slot in used:
+            if slot.alive():
+                slot.find_window()
+                slot.take_over()  # an existing window: remember where it was, for /close
             slot.start()
-        stale = {slot.role: [t["id"] for t in slot.pages()] for slot in used}
+        old = {t for tabs in self.tabs for t in tabs}  # the previous deck's tabs, if still the agent's
+        stale = {slot.role: [t for t in slot.agent_tabs() if t in old] for slot in used}
         self.tabs = [[used[j].open(url) for j, url in enumerate(s.urls())] for s in scenes]
         self.scenes = scenes
         for slot in self.slots:
             for target_id in stale.get(slot.role, []):
                 slot.close(target_id)
             slot.hide()
+
+    def fix_dead_links(self):
+        """Once the deck's tabs have loaded: a page link the site says doesn't exist (often a
+        URL the model half-remembered) becomes a search for the scene on that same site,
+        which usually finds the real page first. Returns the indexes of scenes changed."""
+        scenes, tabs = self.scenes, self.tabs
+        checks = []  # (scene index, pane index, slot, tab)
+        for i, scene in enumerate(scenes):
+            browser = [j for j, p in enumerate(scene.panes) if p.kind in BROWSER_KINDS]
+            for b, (j, tab) in enumerate(zip(browser, tabs[i])):
+                if scene.panes[j].kind == "url":
+                    checks.append((i, j, self.slots[b], tab))
+        with ThreadPoolExecutor(8) as pool:
+            dead = list(pool.map(lambda c: page_is_dead(c[2].port, c[3]), checks))
+        changed = set()
+        for (i, j, slot, tab), is_dead in zip(checks, dead):
+            if not is_dead or self.scenes is not scenes:  # the deck was replaced meanwhile
+                continue
+            site = urllib.parse.urlsplit(scenes[i].panes[j].url).netloc.removeprefix("www.")
+            query = f"{scenes[i].name} site:{site}"
+            slot.navigate(tab, search_url(query))
+            scenes[i].panes[j] = Pane(kind="search", query=query)
+            scenes[i].note = (scenes[i].note + " · page gone, showing a site search").lstrip(" ·")
+            changed.add(i)
+        return sorted(changed)
 
     def apply(self, i, area):
         """Show deck scene i inside area = (x, y, w, h). App panes are placed, not restored."""
@@ -103,6 +135,32 @@ class Desktop:
             pane.maximized = win["maximized"] or None
             panes.append(pane)
         return SceneSpec(name=name, layout="free", panes=panes) if panes else None  # None: empty desktop
+
+    def close_deck(self, keep=None):
+        """Drop the deck and the other tabs the agent opened (answers, decks from before a
+        restart). The user's own tabs always stay. keep: a deck scene index whose tabs stay
+        open where they are (the card the user is looking at; a later close_deck closes them).
+        A window left with only blank tabs is hidden (Chromium keeps running, so the next deck
+        opens quickly); one with the user's tabs shows their last tab."""
+        kept = set(self.tabs[keep]) if keep is not None and keep < len(self.tabs) else set()
+        for slot in self.slots:
+            if not slot.alive():
+                continue
+            mine = [t for t in slot.agent_tabs() if t not in kept]
+            left = [t["id"] for t in slot.pages() if t["id"] not in mine]  # the user's, and kept
+            if not left:
+                slot.open("about:blank")  # closing a window's last tab would close the window
+            for target_id in mine:
+                slot.close(target_id)
+            if kept & set(left):
+                continue  # this window shows the kept scene: leave it (a later close finishes it)
+            if left:
+                slot.activate(left[-1])  # back to the user's own tab...
+                slot.give_back()         # ...in the window where it was before the deck
+            else:
+                slot.hide()
+                slot.before = slot.placed = None
+        self.scenes, self.tabs, self.rects = [], [], []
 
     def restore(self):
         """Back to the user's own desktop: hide the scene windows."""

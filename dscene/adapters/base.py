@@ -49,7 +49,8 @@ def place_window(win_id, rect, maximized=False, activate=True):
         x, y, w, h = rect
         left, right, top, bottom = frame_extents(win_id)
         cw, ch = max(w - left - right, 50), max(h - top - bottom, 50)  # wmctrl sizes the contents
-        sh("wmctrl", "-i", "-r", win_id, "-b", "remove,maximized_vert,maximized_horz")
+        for prop in ("maximized_vert", "maximized_horz"):  # xfwm4 ignores both in one request
+            sh("wmctrl", "-i", "-r", win_id, "-b", f"remove,{prop}")
         sh("wmctrl", "-i", "-r", win_id, "-e", f"0,{x},{y},{cw},{ch}")
         time.sleep(0.15)
         got = frame_rect(win_id)  # correct whatever offset the window manager applied

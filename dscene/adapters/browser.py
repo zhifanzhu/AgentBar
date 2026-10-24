@@ -3,9 +3,14 @@
 Each slot is its own Chromium instance, so it has its own window that stays put while
 its content changes. Over CDP we open, activate and close tabs, read and set the scroll
 position, and screenshot tabs in the background (even in a minimized window).
+
+The user browses in these windows too, so the agent only ever closes tabs it opened
+itself (recorded in ~/.cache/agentbar/agent-tabs.json, which survives a restart of the
+bar) and that still show the site it opened; a tab the user took elsewhere is theirs.
 """
 import base64
 import json
+import re
 import subprocess
 import time
 import urllib.parse
@@ -14,7 +19,21 @@ from pathlib import Path
 
 import websocket
 
-from dscene.adapters.base import place_window, sh
+from dscene.adapters.base import frame_rect, place_window, sh
+
+AGENT_TABS = Path.home() / ".cache" / "agentbar" / "agent-tabs.json"
+
+
+def _agent_tabs():
+    try:
+        return json.loads(AGENT_TABS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_agent_tabs(tabs):
+    AGENT_TABS.parent.mkdir(parents=True, exist_ok=True)
+    AGENT_TABS.write_text(json.dumps(tabs))
 
 
 # -- CDP ---------------------------------------------------------------------------
@@ -42,6 +61,35 @@ def cdp(port, target_id, method, params=None, timeout=10):
 def js(port, target_id, expression):
     result = cdp(port, target_id, "Runtime.evaluate", {"expression": expression, "returnByValue": True})
     return result["result"].get("value")
+
+
+NOT_FOUND = re.compile(r"\b404\b|not found|can.t be found|cannot be found|no longer exists", re.I)
+
+
+def _same_place(a, b, slack=6):
+    """Two window geometries match (allowing for a few pixels of window-manager rounding)."""
+    if a["minimized"] or b["minimized"]:
+        return a["minimized"] == b["minimized"]
+    if a["maximized"] or b["maximized"]:
+        return a["maximized"] == b["maximized"]
+    return bool(a["rect"] and b["rect"]) and all(abs(x - y) <= slack for x, y in zip(a["rect"], b["rect"]))
+
+
+def page_is_dead(port, target_id, wait=10.0):
+    """After the tab has loaded: did the site say the page doesn't exist (HTTP 404/410, or
+    a "page not found" title)? Checked in the real browser, which bot-blocking sites let
+    through where a script's request gets a challenge page instead."""
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        try:
+            if js(port, target_id, "document.readyState") != "loading":
+                break
+        except Exception:  # noqa: BLE001 - not ready to answer yet
+            pass
+        time.sleep(0.4)
+    page = js(port, target_id, "({status: (performance.getEntriesByType('navigation')[0] || {})"
+                                ".responseStatus, title: document.title})") or {}
+    return page.get("status") in (404, 410) or bool(NOT_FOUND.search(page.get("title") or ""))
 
 
 def tab_state(port, target_id):
@@ -89,6 +137,8 @@ class ChromeSlot:
         self.win_id = None
         self.rect = None  # last geometry we placed the window at
         self.shown_tab = None  # the tab this window last showed
+        self.before = None  # its geometry before a deck took it over, to give back on /close
+        self.placed = None  # its geometry where the deck last put it
 
     def _get(self, path, method="GET"):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method=method)
@@ -136,10 +186,37 @@ class ChromeSlot:
                 if t.get("type") == "page" and not t.get("url", "").startswith("chrome://")]
 
     def open(self, url):
-        return self._get("/json/new?" + urllib.parse.quote(url, safe=""), method="PUT")["id"]
+        target_id = self._get("/json/new?" + urllib.parse.quote(url, safe=""), method="PUT")["id"]
+        tabs = _agent_tabs()
+        tabs[target_id] = url
+        _save_agent_tabs(tabs)
+        return target_id
 
     def close(self, target_id):
         self._get(f"/json/close/{target_id}")
+        tabs = _agent_tabs()
+        if tabs.pop(target_id, None) is not None:
+            _save_agent_tabs(tabs)
+
+    def navigate(self, target_id, url):
+        """Load url in one of the agent's tabs (it stays the agent's)."""
+        cdp(self.port, target_id, "Page.navigate", {"url": url})
+        tabs = _agent_tabs()
+        if target_id in tabs:
+            tabs[target_id] = url
+            _save_agent_tabs(tabs)
+
+    def agent_tabs(self):
+        """Ids of this window's tabs that are the agent's to close: ones it opened that still
+        show the site it opened, and blank tabs. Every other tab is the user's."""
+        opened, mine = _agent_tabs(), []
+        for t in self.pages():
+            url = t.get("url", "")
+            if url in ("", "about:blank") or (
+                    t["id"] in opened
+                    and urllib.parse.urlsplit(url).netloc == urllib.parse.urlsplit(opened[t["id"]]).netloc):
+                mine.append(t["id"])
+        return mine
 
     def activate(self, target_id):
         self._get(f"/json/activate/{target_id}")
@@ -178,12 +255,45 @@ class ChromeSlot:
         return None
 
     def show(self, rect, maximized=False):
-        if (rect, maximized) != self.rect:  # only move/resize when the layout changed
+        moved = (rect, maximized) != self.rect  # only move/resize when the layout changed
+        if moved:
             place_window(self.win_id, rect, maximized, activate=False)
             self.rect = (rect, maximized)
         sh("wmctrl", "-i", "-a", self.win_id)
+        if moved and self.before is not None:
+            self.placed = self.geometry()  # where we put it; a user's move later isn't ours
 
     def hide(self):
         if self.win_id:
             sh("xdotool", "windowminimize", str(int(self.win_id, 16)))
             self.rect = None  # the user may move it while it's ours to restore
+            if self.before is not None:
+                self.placed = self.geometry()
+
+    def geometry(self):
+        """Where the window is: {"rect": [x, y, w, h] with its frame, "maximized", "minimized"}."""
+        state = sh("xprop", "-id", self.win_id, "_NET_WM_STATE")
+        return {"rect": frame_rect(self.win_id),
+                "maximized": "MAXIMIZED_VERT" in state and "MAXIMIZED_HORZ" in state,
+                "minimized": "_NET_WM_STATE_HIDDEN" in state}
+
+    def take_over(self):
+        """A deck is about to use this window: remember where it was (once per deck run)."""
+        if self.before is None and self.win_id:
+            self.before = self.geometry()
+            self.placed = None
+
+    def give_back(self):
+        """The deck is done with this window: put it back where it was, unless the user
+        moved or resized it meanwhile (then where it is now is their choice)."""
+        before, placed, self.before, self.placed = self.before, self.placed, None, None
+        if not before or not self.win_id:
+            return
+        now = self.geometry()
+        if placed is not None and not _same_place(now, placed):
+            return  # the user moved it since the deck placed it
+        if before["minimized"]:
+            self.hide()
+        else:
+            place_window(self.win_id, before["rect"], before["maximized"], activate=False)
+            self.rect = None

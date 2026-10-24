@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 
 VERSION = 1
 LAYOUTS = {"full": 1, "split-2": 2, "split-3": 3}  # plus "free": every pane brings its own rect
-BROWSER_KINDS = ("url", "map", "search")
+BROWSER_KINDS = ("url", "map", "route", "search")
 APP_KINDS = ("blender", "impress", "window")
 DECKS = Path.home() / ".local" / "share" / "dscene" / "decks"
 BLOBS = Path.home() / ".local" / "share" / "dscene" / "blobs"  # .blend / .odp checkpoints
@@ -36,8 +36,9 @@ BLOBS = Path.home() / ".local" / "share" / "dscene" / "blobs"  # .blend / .odp c
 
 class Pane(BaseModel):
     """One window in a scene, with the state to show in it."""
-    kind: Literal["url", "map", "search", "blender", "impress", "window"] = Field(
+    kind: Literal["url", "map", "route", "search", "blender", "impress", "window"] = Field(
         description="url: a web page; map: OpenStreetMap at lat/lon (or a search for `label`); "
+                    "route: Google Maps directions from `origin` to `destination` by `travel`; "
                     "search: a web search for `query`; blender / impress: the user's Blender or "
                     "LibreOffice Impress window, optionally restored to a captured state; window: "
                     "any other app window, matched by `app`, placed but not restored")
@@ -47,6 +48,11 @@ class Pane(BaseModel):
     lat: float | None = Field(None, description="map: latitude")
     lon: float | None = Field(None, description="map: longitude")
     label: str | None = Field(None, description="map: the place's name")
+    origin: str | None = Field(None, description="route: where from, a place name or address "
+                                                 "(e.g. \"Queen Square, Bristol\") or \"lat,lon\"")
+    destination: str | None = Field(None, description="route: where to, same forms as origin")
+    travel: Literal["transit", "walking", "driving", "bicycling"] | None = Field(
+        None, description="route: how; default transit (buses and trains, with times)")
     query: str | None = Field(None, description="search: what to search for")
     engine: Literal["google", "duckduckgo", "bing", "chatgpt", "perplexity"] | None = Field(
         None, description="search: where to search; defaults to the user's chosen answer engine")
@@ -80,6 +86,10 @@ class Pane(BaseModel):
                 return (f"https://www.openstreetmap.org/?mlat={self.lat}&mlon={self.lon}"
                         f"#map=17/{self.lat}/{self.lon}")
             return "https://www.openstreetmap.org/search?query=" + urllib.parse.quote(self.label or "")
+        if self.kind == "route":  # Google's documented directions link; no key needed
+            return "https://www.google.com/maps/dir/?" + urllib.parse.urlencode(
+                {"api": 1, "origin": self.origin or "", "destination": self.destination or self.label or "",
+                 "travelmode": self.travel or "transit", "hl": "en"})
         return search_url(self.query or self.label or self.url or "", self.engine)
 
 

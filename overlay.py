@@ -213,19 +213,25 @@ class Caption(Gtk.Window):
             self.set_visual(visual)
         self.set_app_paintable(True)
         self.markup = ""
+        self.max_width = None  # wrap lines longer than this many pixels
         self.connect("draw", self._draw)
         # Empty input shape: clicks fall through to the windows underneath.
         self.connect("realize", lambda w: w.input_shape_combine_region(cairo.Region()))
 
     def _layout(self, cr=None):
         layout = PangoCairo.create_layout(cr) if cr else self.create_pango_layout("")
-        layout.set_font_description(Pango.FontDescription("Sans Bold 20"))
+        layout.set_font_description(Pango.FontDescription("Sans Bold 17"))
         layout.set_markup(self.markup, -1)
+        if self.max_width:
+            layout.set_width(self.max_width * Pango.SCALE)
+            layout.set_wrap(Pango.WrapMode.WORD_CHAR)
         return layout
 
-    def show_at(self, markup, x, bottom):
-        """Show markup with its bottom-left corner at (x, bottom)."""
+    def show_at(self, markup, x, bottom, max_width=None):
+        """Show markup with its bottom-left corner at (x, bottom), wrapped to fit max_width
+        (default: the rest of the screen to the right of x)."""
         self.markup = markup
+        self.max_width = max(120, (max_width or self.get_screen().get_width() - x - 24) - 2 * PAD)
         w, h = self._layout().get_pixel_size()
         self.resize(w + 2 * PAD, h + 2 * PAD)
         self.move(x, bottom - h - 2 * PAD)
@@ -235,10 +241,12 @@ class Caption(Gtk.Window):
             self.get_window().raise_()
 
     def show_centered(self, markup, bottom):
-        """Show markup centred horizontally on the screen, bottom edge at bottom."""
+        """Show markup centred horizontally on the screen, bottom edge at bottom; lines wrap
+        at 80% of the screen width."""
         self.markup = markup
+        self.max_width = int(self.get_screen().get_width() * 0.8) - 2 * PAD
         w, _ = self._layout().get_pixel_size()
-        self.show_at(markup, (self.get_screen().get_width() - w) // 2 - PAD, bottom)
+        self.show_at(markup, (self.get_screen().get_width() - w) // 2 - PAD, bottom, w + 2 * PAD)
 
     def _draw(self, _w, cr):
         cr.set_operator(cairo.OPERATOR_SOURCE)

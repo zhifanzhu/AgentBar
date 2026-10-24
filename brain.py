@@ -77,11 +77,17 @@ def remember(note):
 
 
 def system_prompt(request=""):
-    """The prompt layers for one request (see prompts/README.md): SYSTEM.md, the user's
-    USER.md, and notes for the apps that are open or named in the request."""
+    """The prompt layers for one request (see prompts/README.md): SYSTEM.md, ABOUT.md with
+    the current settings, the user's USER.md, and notes for the apps that are open or named
+    in the request."""
     from dscene.desktop import list_windows  # late: dscene imports brain
 
-    parts = [(PROMPTS / "SYSTEM.md").read_text().strip()]
+    cfg = load_config()
+    settings = (f"Settings now: brain {cfg['provider']} / {cfg['models'][cfg['provider']]}; "
+                f"finding elements: {cfg['grounding']['provider']}; "
+                f"web answers open in: {cfg.get('answer_engine') or 'duckduckgo'}.")
+    parts = [(PROMPTS / "SYSTEM.md").read_text().strip(), (PROMPTS / "ABOUT.md").read_text().strip(),
+             settings]
     notes = user_notes()
     if notes:
         parts.append("About the user (their own notes):\n" + notes)
