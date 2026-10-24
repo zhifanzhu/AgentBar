@@ -5,9 +5,10 @@ http://127.0.0.1:8765/mcp. Tools that touch GTK are run on the GTK main loop;
 slow work (Chrome, LibreOffice, the grounding model) runs in worker threads.
 
 Tool tiers: observe (list_windows, get_state, get_screen, find_element),
-present (prepare_scenes, show_scene, restore_desktop, decks), guide (annotate,
-clear_annotations, toast), ask (ask_user, select_region), act
-(insert_image_to_slides). There is deliberately no click/type tool yet.
+present (prepare_scenes, show_scene, focus_window, restore_desktop, decks),
+guide (annotate, clear_annotations, toast, guide_step), ask (ask_user,
+select_region), act (insert_image_to_slides). There is deliberately no
+click/type tool yet.
 """
 import asyncio
 import base64
@@ -189,6 +190,21 @@ def build(bar):
         await asyncio.sleep(0.5)  # let it repaint before anyone takes a screenshot
         return {"focused": window}
 
+    @server.tool(structured_output=False)
+    async def focus_app(name: str) -> list:
+        """Bring an app to the front by name (matched against window app and title, e.g.
+        "blender", "impress", "firefox") and return its window info plus a screenshot of the
+        screen. One call instead of list_windows + focus_window + get_screen."""
+        wanted = name.lower()
+        windows = [w for w in await asyncio.to_thread(desktop.list_windows)
+                   if not w["ours"] and (wanted in w["app"].lower() or wanted in w["title"].lower())]
+        if not windows:
+            raise ValueError(f"no window matches {name!r}; see list_windows")
+        win = windows[0]
+        await focus_window(win["id"])
+        jpeg, _ = await _on_gtk(bar.screenshot_png, None, "jpeg")
+        return [win, Image(data=jpeg, format="jpeg")]
+
     @server.tool()
     async def restore_desktop() -> dict:
         """Hide the scene windows and return to the user's own desktop."""
@@ -237,18 +253,40 @@ def build(bar):
         return {"shown": True}
 
     # -- ask -------------------------------------------------------------------
+    async def ask(question, options, timeout_s):
+        try:
+            return await _on_gtk_later(bar.ask, question, options, timeout=timeout_s)
+        except TimeoutError:
+            await _on_gtk(bar.ask_cancel)
+            return None
+
     @server.tool()
     async def ask_user(question: str, options: list[str] | None = None, timeout_s: int = 300) -> dict:
         """Ask the user in the agent bar and wait for the answer. With options, they get one
-        button per option; they can always type a free answer instead. Use it to confirm before
-        anything risky, to let them choose, or to wait until they've done a tutorial step.
-        Returns {"answer": text} or {"answer": null} if they don't answer in time."""
+        button per option; they can also type a free answer (F4 focuses the bar). The bar
+        doesn't take keyboard focus, so the user's keys keep going to their app. Use it to
+        confirm before anything risky or to let them choose. Returns {"answer": text}, or
+        {"answer": null} if they don't answer in time."""
+        return {"answer": await ask(question, options or [], timeout_s)}
+
+    @server.tool(structured_output=False)
+    async def guide_step(step: int, instruction: str, target: Target,
+                         options: list[str] | None = None, timeout_s: int = 600) -> list:
+        """One tutorial step in a single call: mark `target` with a numbered STEP badge and
+        `instruction`, show the instruction in the bar (without taking keyboard focus from the
+        user's app), wait until the user answers (default options "Done" / "Stop"), remove the
+        mark, and return their answer plus a screenshot of the screen right afterwards, so you
+        can check the step really happened before choosing the next one. A step is ONE click or
+        key press; target an element by description (found visually) or by point/region."""
+        rect = await resolve(target)
+        item_id = await _on_gtk(bar.annotations.add, "step", rect, instruction, step)
         try:
-            answer = await _on_gtk_later(bar.ask, question, options or [], timeout=timeout_s)
-        except TimeoutError:
-            await _on_gtk(bar.ask_cancel)
-            answer = None
-        return {"answer": answer}
+            answer = await ask(f"Step {step}: {instruction}", options or ["Done", "Stop"], timeout_s)
+        finally:
+            await _on_gtk(bar.annotations.remove, [item_id])
+        await asyncio.sleep(0.4)  # let the app repaint after the user's action
+        jpeg, _ = await _on_gtk(bar.screenshot_png, None, "jpeg")
+        return [{"step": step, "answer": answer, "marked": list(rect)}, Image(data=jpeg, format="jpeg")]
 
     @server.tool()
     async def select_region(prompt: str = "Drag to select") -> dict:

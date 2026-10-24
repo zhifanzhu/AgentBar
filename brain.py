@@ -14,19 +14,25 @@ Config lives in ~/.config/agentbar/brain.json; edit it by hand or with the bar's
 import asyncio
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from dscene.recorder import RECORDER
+
 CONFIG = Path.home() / ".config" / "agentbar" / "brain.json"
 DEFAULTS = {
     "provider": "gemini",
-    "models": {"gemini": "gemini-3.8-flash", "local": "holo3-1-9b"},
+    "models": {"gemini": "gemini-3.6-flash", "local": "holo3-1-9b"},
     "local_url": "http://10.0.2.2:8000/v1",
     "gemini_api_key": "",
     "grounding": {"url": "http://10.0.2.2:8000/v1", "model": "holo3-1-9b"},  # for find_element
     "max_steps": 16,
+    # minimal is fastest (gemini-3.6-flash: ~1.8 s per step vs ~4.2 s for 3.8-flash at low);
+    # models without it (3.8-flash, 4-argon) fall back to low automatically.
+    "thinking_level": "minimal",
 }
 GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 DSCENE_URL = "http://127.0.0.1:8765/mcp"
@@ -40,15 +46,15 @@ XFCE, one screen). The user types requests into the bar; you act through the dsc
   "map" with lat/lon). Put key facts in note, under 60 characters. Never invent prices or
   URLs; use a pane of kind "search" when you don't have a real URL.
 - Capturing the screen into slides: select_region, then insert_image_to_slides with its path.
-- How to do something in an app: bring it to the front first (list_windows, focus_window),
-  then guide the user one step at a time. A step is exactly ONE click or key press: opening
-  a menu, picking a submenu and picking an item are separate steps. For each step, use
-  find_element to locate the control, annotate it (kind "step", step number, short
-  instruction), then ask_user with options like ["Done", "Stop"] and wait. After the user
-  answers, clear that step's annotation and call get_screen to see what actually happened
-  before choosing the next step; if the step didn't take effect, explain and mark it again.
-  Only say the task is complete when the screen shows it. Don't click for the user.
-- Use toast for brief confirmations and ask_user when the request is ambiguous.
+- How to do something in an app: bring it to the front and look at it with one focus_app
+  call, then call guide_step once per step. A step is exactly ONE click or key press: opening a
+  menu, picking a submenu and picking an item are separate steps. guide_step marks the
+  control, waits for the user and returns a screenshot of the result: look at it before the
+  next step, and if the step didn't take effect, explain and mark it again. The user's
+  keyboard stays in their app, so steps like "press Escape" work. Only say the task is
+  complete when the screenshot shows it. Don't click for the user.
+- Use ask_user when the request is ambiguous. Use toast only for notices in the middle of
+  a task: don't toast at the end, because your final reply is already shown in the bar.
 - Your final text reply is shown in the bar: one or two short sentences."""
 
 
@@ -138,6 +144,17 @@ def _result_parts(result):
     return (f"ERROR: {text}" if failed else text), images
 
 
+def _without_signatures(resp):
+    """The model response minus opaque blobs (thought signatures), for the trajectory log."""
+    def walk(node):
+        if isinstance(node, dict):
+            return {k: ("…" if k == "signature" else walk(v)) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(n) for n in node]
+        return node
+    return walk(resp)
+
+
 class Agent:
     """One conversation with the configured model, acting through dscene."""
 
@@ -150,29 +167,66 @@ class Agent:
         self.messages = []       # OpenAI-compatible history, kept here
 
     def run(self, text, cfg=None):
-        """Handle one request; returns the model's final reply. Blocking."""
-        return asyncio.run(self._run(text, cfg or load_config()))
+        """Handle one request; returns the model's final reply. Blocking. Recorded as a run."""
+        cfg = cfg or load_config()
+        RECORDER.start(text, provider=cfg["provider"], model=cfg["models"][cfg["provider"]],
+                       continues_conversation=bool(self.previous_id or self.messages))
+        try:
+            reply = asyncio.run(self._run(text, cfg))
+        except Exception as e:
+            RECORDER.end(error=str(e))
+            raise
+        RECORDER.end(reply=reply)
+        return reply
 
     async def _run(self, text, cfg):
         from mcp import Client  # imported lazily: only the brain thread needs it
 
         async with Client(DSCENE_URL) as dscene:
+            await self._snapshot(dscene, "before")
             tools = [{"name": t.name, "description": t.description or "",
                       "parameters": plain_schema(t.input_schema)}
                      for t in (await dscene.list_tools()).tools]
             loop = self._gemini if cfg["provider"] == "gemini" else self._openai
-            return await loop(cfg, text, tools, dscene)
+            try:
+                return await loop(cfg, text, tools, dscene)
+            finally:
+                await self._snapshot(dscene, "after")
+
+    async def _snapshot(self, dscene, when):
+        """Record the desktop (windows, bar state, a screenshot) without showing it to the model."""
+        try:
+            listed = await dscene.call_tool("list_windows", {})  # one text block per window
+            windows = [json.loads(c.text) for c in listed.content if c.type == "text"]
+            state, _ = _result_parts(await dscene.call_tool("get_state", {}))
+            _, shots = _result_parts(await dscene.call_tool("get_screen", {}))
+            RECORDER.event("snapshot", when=when, windows=windows, state=json.loads(state),
+                           screenshot=RECORDER.image(shots[0][1], shots[0][0]) if shots else None)
+        except Exception as e:  # noqa: BLE001 - recording must never break a request
+            RECORDER.event("snapshot_failed", when=when, error=str(e))
 
     async def _call(self, dscene, name, args):
         """Run one dscene tool; returns (text, images)."""
         self.on_event(f"→ {name}")
         print(f"[agent] {name} {json.dumps(args)[:300]}", flush=True)
+        t0 = time.perf_counter()
         try:
             text, images = _result_parts(await dscene.call_tool(name, args))
         except Exception as e:  # noqa: BLE001 - report tool failures back to the model
             text, images = f"ERROR: {e}", []
-        print(f"[agent]   = {text[:300]}{f' + {len(images)} image(s)' if images else ''}", flush=True)
+        seconds = round(time.perf_counter() - t0, 3)
+        print(f"[agent]   = {text[:300]}{f' + {len(images)} image(s)' if images else ''} ({seconds}s)", flush=True)
+        RECORDER.event("tool", name=name, args=args, seconds=seconds, result=text[:4000],
+                       images=[RECORDER.image(data, mime) for mime, data in images])
         return text, images
+
+    def _model_call(self, url, body, headers=None, step=0):
+        """One request to the model, timed and recorded (without the images it was sent)."""
+        t0 = time.perf_counter()
+        resp = _http(url, body, headers)
+        RECORDER.event("model", step=step, seconds=round(time.perf_counter() - t0, 3),
+                       usage=resp.get("usage"), response=_without_signatures(resp))
+        return resp
 
     async def _gemini(self, cfg, text, tools, dscene):
         key = gemini_key(cfg)
@@ -180,12 +234,22 @@ class Agent:
             raise BrainError("no Gemini API key: type /key gemini YOUR_KEY")
         declared = [{"type": "function", **t} for t in tools] + [{"type": "google_search"}]
         step_input = text
-        for _ in range(cfg["max_steps"]):
+        level = cfg["thinking_level"]
+        for step in range(cfg["max_steps"]):
             body = {"model": cfg["models"]["gemini"], "input": step_input, "system_instruction": SYSTEM,
-                    "tools": declared, "generation_config": {"thinking_level": "low"}}
+                    "tools": declared, "generation_config": {"thinking_level": level}}
             if self.previous_id:
                 body["previous_interaction_id"] = self.previous_id
-            resp = await asyncio.to_thread(_http, f"{GEMINI}/interactions", body, {"x-goog-api-key": key})
+            try:
+                resp = await asyncio.to_thread(self._model_call, f"{GEMINI}/interactions", body,
+                                               {"x-goog-api-key": key}, step)
+            except BrainError as e:
+                if "thinking" not in str(e).lower() or level == "low":
+                    raise
+                level = body["generation_config"]["thinking_level"] = "low"  # model lacks this level
+                RECORDER.event("thinking_fallback", error=str(e))
+                resp = await asyncio.to_thread(self._model_call, f"{GEMINI}/interactions", body,
+                                               {"x-goog-api-key": key}, step)
             self.previous_id = resp.get("id")
             steps = resp.get("steps", [])
             calls = [s for s in steps if s.get("type") == "function_call"]
@@ -206,11 +270,11 @@ class Agent:
         if not self.messages:
             self.messages.append({"role": "system", "content": SYSTEM})
         self.messages.append({"role": "user", "content": text})
-        for _ in range(cfg["max_steps"]):
-            resp = await asyncio.to_thread(_http, f"{cfg['local_url']}/chat/completions", {
+        for step in range(cfg["max_steps"]):
+            resp = await asyncio.to_thread(self._model_call, f"{cfg['local_url']}/chat/completions", {
                 "model": cfg["models"]["local"], "messages": self.messages, "tools": declared,
                 "tool_choice": "auto", "temperature": 0.0, "max_tokens": 2000,
-                "chat_template_kwargs": {"enable_thinking": False}})
+                "chat_template_kwargs": {"enable_thinking": False}}, None, step)
             msg = resp["choices"][0]["message"]
             self.messages.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls")})
             if not msg.get("tool_calls"):

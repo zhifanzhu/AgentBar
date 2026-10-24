@@ -27,6 +27,7 @@ import brain  # noqa: E402
 import dscene.server  # noqa: E402
 from desktop import Desktop  # noqa: E402
 from dscene import spec  # noqa: E402
+from dscene.recorder import RECORDER  # noqa: E402
 from overlay import AnnotationLayer, Caption  # noqa: E402
 from selector import RegionSelector  # noqa: E402
 
@@ -64,6 +65,7 @@ class AgentBar(Gtk.ApplicationWindow):
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
         self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+        self.stick()  # on every workspace: focusing it must never switch workspaces
 
         self.desktop = Desktop()
         self.caption = Caption()
@@ -75,6 +77,7 @@ class AgentBar(Gtk.ApplicationWindow):
         self.preparing = False  # scene windows come and go: don't auto-hide meanwhile
         self.thinking = False   # the agent is working on a request
         self.pending_ask = None  # done() callback while ask_user waits for an answer
+        self.asked_at = 0.0
         self.agent = brain.Agent(on_event=lambda line: GLib.idle_add(self._progress, line))
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
@@ -157,7 +160,8 @@ class AgentBar(Gtk.ApplicationWindow):
     def on_enter(self, entry):
         text = entry.get_text().strip()
         if self.pending_ask:
-            self.answer(text or None)
+            if text:
+                self.answer(text)
             return
         if not text:
             return
@@ -196,6 +200,7 @@ class AgentBar(Gtk.ApplicationWindow):
     def command(self, text):
         args = text.split()
         cmd = args[0].lower()
+        RECORDER.event("command", command=cmd)  # never the arguments: /key carries a secret
         cfg = brain.load_config()
         if cmd == "/model" and len(args) >= 2:
             provider = args[1].lower()
@@ -297,8 +302,11 @@ class AgentBar(Gtk.ApplicationWindow):
         return {"showing": self.current}
 
     def ask(self, question, options, done):
+        """Show a question in the bar without taking keyboard focus from the user's app."""
         self.ask_cancel()
         self.pending_ask = done
+        self.asked_at = time.time()
+        self.desktop.remember_focus()  # where their keys are going now, and go back to
         self.question.set_text(question)
         for option in options:
             button = Gtk.Button(label=option)
@@ -306,15 +314,21 @@ class AgentBar(Gtk.ApplicationWindow):
             button.connect("clicked", lambda _b, o=option: self.answer(o))
             self.options_box.pack_start(button, False, False, 0)
         self.entry.set_text("")
-        self.entry.set_placeholder_text("Type an answer, or press a button…")
-        self.summon()
+        self.entry.set_placeholder_text("Press a button, or F4 to type an answer…")
+        if not self.get_visible():
+            self.set_focus_on_map(False)  # appear, but leave the keyboard where it is
+            self.show_all()
+            GLib.timeout_add(500, lambda: self.set_focus_on_map(True) or False)
         self.question.show()
         self.options_box.show_all()
+        RECORDER.event("ask", question=question, options=options)
 
     def answer(self, text):
         done, self.pending_ask = self.pending_ask, None
+        RECORDER.event("answer", answer=text, waited=round(time.time() - self.asked_at, 1))
         self.ask_cancel()
         if done:
+            self.desktop.refocus()  # hand the keyboard back to the user's app
             done(text)
 
     def ask_cancel(self):
@@ -408,6 +422,7 @@ class AgentBar(Gtk.ApplicationWindow):
             else:
                 self.caption.hide()
         self.current = i
+        RECORDER.event("scene", index=i, name=self.desktop.scenes[i].name if i is not None else None)
         for j, card in enumerate(self.cards):
             ctx = card.get_style_context()
             (ctx.add_class if j == i else ctx.remove_class)("active")
@@ -419,7 +434,7 @@ class AgentBar(Gtk.ApplicationWindow):
         key = event.keyval
         if key == Gdk.KEY_Escape:
             if self.pending_ask:
-                self.answer(None)
+                self.desktop.refocus()  # Esc never cancels the agent: it hands the keyboard back
             elif self.current is None:
                 self.dismiss(refocus=True)
             else:
