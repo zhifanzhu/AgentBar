@@ -1,4 +1,5 @@
-# SceneBar
+
+# <img width="443" height="67" alt="SceneBar" src="https://github.com/user-attachments/assets/6e3ccd11-4505-41e9-a852-67001255290b" />
 
 Demo video: https://www.youtube.com/watch?v=qjR1piz74VA
 
