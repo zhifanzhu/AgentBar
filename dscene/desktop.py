@@ -37,9 +37,11 @@ class Desktop:
                 slot.find_window()
                 slot.take_over()  # an existing window: remember where it was, for /close
             slot.start()
-        old = {t for tabs in self.tabs for t in tabs}  # the previous deck's tabs, if still the agent's
-        stale = {slot.role: [t for t in slot.agent_tabs() if t in old] for slot in used}
-        self.tabs = [[used[j].open(url, deck=True) for j, url in enumerate(s.urls())] for s in scenes]
+        # One deck at a time: earlier decks' tabs (if still the agent's) and blank tabs go,
+        # once the new deck's own tabs are open.
+        stale = {slot.role: slot.agent_tabs(replacing=True) for slot in used}
+        self.tabs = [[used[j].open(url, deck=True, new_tab=True) for j, url in enumerate(s.urls())]
+                     for s in scenes]
         self.scenes = scenes
         for slot in self.slots:
             for target_id in stale.get(slot.role, []):

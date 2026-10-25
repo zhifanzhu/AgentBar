@@ -170,7 +170,7 @@ def build(stage):
         """Replace the deck with these scenes (or a saved deck by name) and show them as cards
         to flip through (the host app may show them as cards). Use it to compare options: one scene
         per option, e.g. its page next to a map. Browser panes are preloaded so flipping is
-        instant. Page links that don't exist are replaced by a web search."""
+        instant. Page links that don't exist are replaced by the top web result for the scene's name (or a web search)."""
         if saved:
             _, scenes = spec.load_deck(saved)
         if not scenes:

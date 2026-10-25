@@ -15,6 +15,7 @@ Browser panes (url, map, search) live in the bar's own Chromium windows. App pan
 descriptor: the fields needed to bring that window back. `fidelity` (set when a
 scene is captured) says how much comes back: exact, view, or layout only.
 """
+import html
 import json
 import re
 import urllib.error
@@ -37,7 +38,7 @@ BLOBS = Path.home() / ".local" / "share" / "dscene" / "blobs"  # .blend / .odp c
 class Pane(BaseModel):
     """One window in a scene, with the state to show in it."""
     kind: Literal["url", "map", "route", "search", "blender", "impress", "window"] = Field(
-        description="url: a web page; map: OpenStreetMap at lat/lon (or a search for `label`); "
+        description="url: a web page; map: Google Maps showing `label` (its place card) around lat/lon; "
                     "route: Google Maps directions from `origin` to `destination` by `travel`; "
                     "search: a web search for `query`; blender / impress: the user's Blender or "
                     "LibreOffice Impress window, optionally restored to a captured state; window: "
@@ -81,11 +82,13 @@ class Pane(BaseModel):
         """The URL a browser pane shows."""
         if self.kind == "url" and self.url:
             return self.url
-        if self.kind == "map":
-            if self.lat is not None and self.lon is not None:
-                return (f"https://www.openstreetmap.org/?mlat={self.lat}&mlon={self.lon}"
-                        f"#map=17/{self.lat}/{self.lon}")
-            return "https://www.openstreetmap.org/search?query=" + urllib.parse.quote(self.label or "")
+        if self.kind == "map":  # Google Maps: a name gets its place card (photos, rating, hours)
+            here = self.lat is not None and self.lon is not None
+            if self.label and here:  # the name, searched around the point: the right "Box Hill"
+                return (f"https://www.google.com/maps/search/{urllib.parse.quote(self.label)}"
+                        f"/@{self.lat},{self.lon},15z?hl=en")
+            return "https://www.google.com/maps/search/?" + urllib.parse.urlencode(
+                {"api": 1, "query": f"{self.lat},{self.lon}" if here else self.label or "", "hl": "en"})
         if self.kind == "route":  # Google's documented directions link; no key needed
             return "https://www.google.com/maps/dir/?" + urllib.parse.urlencode(
                 {"api": 1, "origin": self.origin or "", "destination": self.destination or self.label or "",
@@ -150,28 +153,58 @@ def layout_rects(scene, area):
     return [(cuts[i], y, cuts[i + 1] - cuts[i], h) for i in range(n)]
 
 
-def _link_is_dead(url):
-    """True only for links that clearly don't exist (sites that block bots still count as alive)."""
+REDIRECTORS = {"vertexaisearch.cloud.google.com"}  # Gemini's Google Search links: a hop to the real page
+
+
+def _check_link(url):
+    """(dead, where it really goes). Dead only for links that clearly don't exist (sites that
+    block bots still count as alive)."""
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=6):
-            return False
+        with urllib.request.urlopen(req, timeout=6) as r:
+            return False, r.geturl()
     except urllib.error.HTTPError as e:
-        return e.code in (404, 410)
+        return e.code in (404, 410), e.geturl() or url
     except (urllib.error.URLError, ValueError, TimeoutError):
-        return True
+        return True, url
+
+
+def _top_results(query):
+    """The first web results for query (DuckDuckGo Lite: plain HTML, no consent page)."""
+    req = urllib.request.Request("https://lite.duckduckgo.com/lite/", headers={"User-Agent": "Mozilla/5.0"},
+                                 data=urllib.parse.urlencode({"q": query, "kl": "uk-en"}).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=6) as r:
+            page = r.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, ValueError, TimeoutError):
+        return []
+    return [html.unescape(u) for u in re.findall(r"href=\"(https?://[^\"]+)\"[^>]*class=.result-link", page)]
+
+
+def _live_link(url, name):
+    """The link to open: url itself (redirect links followed to the real page), else, when it
+    doesn't exist (often a link the model half-remembered), the first live web result for the
+    scene's name; None when there's neither."""
+    dead, final = _check_link(url)
+    if not dead:
+        return final if urllib.parse.urlsplit(url).netloc in REDIRECTORS else url
+    return next((alt for alt in _top_results(name)[:3] if not _check_link(alt)[0]), None)
 
 
 def with_live_links(scenes):
-    """Swap made-up page links (404 / no such host) for a web search. Returns (scenes, swapped names)."""
+    """Swap made-up page links (404 / no such host) for the top web result for the scene (or a
+    web search), and redirect links for the page they lead to (the card shows the real link;
+    /close knows the tab's site). Returns (scenes, names of scenes left showing a search)."""
     checks = [(i, j, p.url) for i, s in enumerate(scenes) for j, p in enumerate(s.panes)
               if p.kind == "url" and p.url]
     with ThreadPoolExecutor(8) as pool:
-        dead = list(pool.map(lambda c: _link_is_dead(c[2]), checks))
+        results = list(pool.map(lambda c: _live_link(c[2], scenes[c[0]].name), checks))
     scenes = [s.model_copy(deep=True) for s in scenes]
     swapped = []
-    for (i, j, _), is_dead in zip(checks, dead):
-        if is_dead:
+    for (i, j, _), live in zip(checks, results):
+        if live:
+            scenes[i].panes[j].url = live
+        else:
             scenes[i].panes[j] = Pane(kind="search", query=scenes[i].name)
             scenes[i].note = (scenes[i].note + " · link not found, showing search").lstrip(" ·")
             swapped.append(scenes[i].name)

@@ -187,10 +187,11 @@ class ChromeSlot:
         return [t for t in self._get("/json/list")
                 if t.get("type") == "page" and not t.get("url", "").startswith("chrome://")]
 
-    def open(self, url, deck=False):
+    def open(self, url, deck=False, new_tab=False):
         """Show url in a tab of the agent's: its blank tab if it has one, else a new tab.
-        deck: the tab is part of a deck, so /close may close it later."""
-        if url != "about:blank":
+        deck: the tab is part of a deck, so /close may close it later. new_tab: always a new
+        one (a blank tab may be about to be closed, or still loading the previous url)."""
+        if url != "about:blank" and not new_tab:
             blank = next((t["id"] for t in self.pages() if t.get("url") in ("", "about:blank")), None)
             if blank:
                 self.navigate(blank, url, deck)
@@ -221,12 +222,13 @@ class ChromeSlot:
         tabs[target_id] = {"url": url, "history": before + 1, "deck": was_deck if deck is None else deck}
         _save_agent_tabs(tabs)
 
-    def agent_tabs(self):
+    def agent_tabs(self, replacing=False):
         """Ids of this window's tabs that are the agent's to close: blank tabs, and deck tabs
         the user hasn't taken up. Never: tabs the agent didn't open, pages it opened for an
         ordinary request (the user asked to see them), and deck tabs the user has moved on in
         (history grew: a click, a search, a video picked), took to another site, or that are
-        playing sound or video."""
+        playing sound or video. replacing: a new deck replaces this one (one deck at a time),
+        so clicks within a deck page don't keep it; another site or playing media still do."""
         opened, mine = _agent_tabs(), []
         for t in self.pages():
             url = t.get("url", "")
@@ -243,7 +245,7 @@ class ChromeSlot:
                                               "'video, audio')].some(m => !m.paused && !m.ended)})")
             except Exception:  # noqa: BLE001 - can't tell: leave it to the user
                 continue
-            if used["history"] <= record["history"] and not used["playing"]:
+            if (replacing or used["history"] <= record["history"]) and not used["playing"]:
                 mine.append(t["id"])
         return mine
 
