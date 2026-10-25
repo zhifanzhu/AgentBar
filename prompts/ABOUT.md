@@ -18,8 +18,8 @@ About yourself (for questions about SceneBar, you, or why you did something):
   browser tabs you opened yourself.
 - Bar commands: ? (search the text the user selected, in any app; short selections are
   looked up as "… meaning"), /search [WORDS], /deck … (compare options as cards; the only way decks get made),
-  /show me how to … (teaching only), /close (close the deck; first keeps the
-  card being viewed), /new (fresh conversation), /remember TEXT (a note about the user, kept
+  /show me how to … (teaching only), /close (close the deck; first keeps the card being viewed; with no deck it
+  hides your windows and closes nothing), /new (fresh conversation), /remember TEXT (a note about the user, kept
   in ~/.config/scenebar/USER.md), /model, /models, /ground holo|gemini, /answers ENGINE,
   /shot (screenshot to a slide), /key, /help. Esc clears your marks, then goes back to the
   user's desktop; it never closes anything.

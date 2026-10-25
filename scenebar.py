@@ -402,7 +402,8 @@ class SceneBar(Gtk.ApplicationWindow, Host):
                 f"Closing failed: {result['error']}" if "error" in result
                 else f"Kept “{kept[0][:40]}”{f' and {len(kept) - 1} more' if len(kept) > 1 else ''} "
                      "on screen · /close again to close it" if kept
-                else "Deck closed · your tabs and pages you asked for stay open")
+                else "Deck closed · your tabs and pages you asked for stay open" if result.get("closed")
+                else "No deck open · hid the agent's windows, their pages are still there")
 
         self.stage.close_deck(closed)
 

@@ -243,8 +243,9 @@ class Stage:
     def close_deck(self, done):
         """Close the deck, in two steps when deck pages are on screen: the first closes the
         deck's pages out of sight but keeps what the user is looking at; the next closes that
-        too. Only deck pages: never the user's tabs, nor pages from other requests.
-        done(titles kept on screen)."""
+        too. Only deck pages: never the user's tabs, nor pages from other requests. With no
+        deck pages to close, it just hides the agent's windows (pages kept), like going back
+        to the user's desktop. done({kept_on_screen: titles, closed: pages closed})."""
         final, self.close_armed = self.close_armed, False
         self.caption.hide()
         self.current = None
@@ -252,17 +253,19 @@ class Stage:
 
         def work():
             try:
-                kept = self.desktop.close_deck(final)
+                kept, closed = self.desktop.close_deck(final)
             except Exception as e:  # noqa: BLE001
                 GLib.idle_add(lambda: done({"error": str(e)}) and False)
                 return
-            GLib.idle_add(finish, kept)
+            GLib.idle_add(finish, kept, closed)
 
-        def finish(kept):
+        def finish(kept, closed):
             self.close_armed = bool(kept)  # the next close closes what was kept
+            if not kept and not closed:
+                self.show(None)  # no deck: put the agent's windows away, close nothing
             if not kept:
                 self.desktop.refocus()
-            done({"kept_on_screen": kept})
+            done({"kept_on_screen": kept, "closed": closed})
             return False
 
         threading.Thread(target=work, daemon=True).start()

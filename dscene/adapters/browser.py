@@ -179,6 +179,7 @@ class ChromeSlot:
             if f".{self.wm_class} " in line:
                 self.win_id = line.split()[0]
                 return True
+        self.win_id = None  # gone (closed by the user); X may reuse its id for another window
         return False
 
     def pages(self):
@@ -303,7 +304,7 @@ class ChromeSlot:
             self.placed = self.geometry()  # where we put it; a user's move later isn't ours
 
     def hide(self):
-        if self.win_id:
+        if self.find_window():  # never a stale id: it may now be another slot's window
             sh("xdotool", "windowminimize", str(int(self.win_id, 16)))
             self.rect = None  # the user may move it while it's ours to restore
             if self.before is not None:

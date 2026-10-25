@@ -144,8 +144,8 @@ class Desktop:
         from ordinary requests always stay. Unless final, deck tabs on screen stay too: the
         user may be looking at them, and a second close (final) takes them. A window left with only blank tabs is
         hidden; one with the user's tabs shows their last tab, back where it was before the deck.
-        Returns the titles of the tabs kept on screen."""
-        kept_titles = []
+        Returns the titles of the tabs kept on screen, and how many pages were closed."""
+        kept_titles, closed = [], 0
         for slot in self.slots:
             if not slot.alive():
                 continue
@@ -154,21 +154,24 @@ class Desktop:
             kept = [] if final else slot.visible_tabs([t for t in mine if pages[t].get("url") != "about:blank"])
             mine = [t for t in mine if t not in kept]
             left = [t for t in pages if t not in mine]  # the user's, and kept
+            shown = slot.current_tab() if mine else None
             if not left:
                 slot.open("about:blank")  # closing a window's last tab would close the window
             for target_id in mine:
                 slot.close(target_id)
+            closed += sum(pages[t].get("url") not in ("", "about:blank") for t in mine)
             if kept:
                 kept_titles += [pages[t].get("title") or pages[t].get("url", "") for t in kept]
                 continue  # on screen: leave this window as it is (the next close finishes it)
             if left:
-                slot.activate(left[-1])  # back to the user's own tab...
-                slot.give_back()         # ...in the window where it was before the deck
+                if shown in mine:
+                    slot.activate(left[-1])  # the page on screen went: back to the user's own tab...
+                slot.give_back()             # ...in the window where it was before the deck
             else:
                 slot.hide()
                 slot.before = slot.placed = None
         self.scenes, self.tabs, self.rects = [], [], []
-        return kept_titles
+        return kept_titles, closed
 
     def restore(self):
         """Back to the user's own desktop: hide the scene windows."""
