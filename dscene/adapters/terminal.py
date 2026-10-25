@@ -20,12 +20,13 @@ from dscene.adapters.base import find_window, place_window, sh
 
 def _rcfile(command):
     macro = command.replace("\\", "\\\\").replace('"', '\\"')
+    bind = '"\\e[0n": "' + macro + '"'  # readline: the terminal's "status OK" reply types the command
     fd, path = tempfile.mkstemp(prefix="agent-terminal-", suffix=".rc")
     with os.fdopen(fd, "w") as f:
         f.write(f"rm -f {shlex.quote(path)}\n"
                 "[ -f ~/.bashrc ] && . ~/.bashrc\n"
                 r"printf '\033[2mTyped by the agent: Enter runs it, Ctrl+C cancels.\033[0m\n'" "\n"
-                f"bind {shlex.quote(f'\"\\e[0n\": \"{macro}\"')}\n"
+                f"bind {shlex.quote(bind)}\n"
                 r"printf '\033[5n'" "\n")
     return path
 
@@ -76,7 +77,7 @@ def read_text(windows, lines=60):
     to tie each tab to its window id (by process and title). Visible tabs come first."""
     import gi
     gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi
+    from gi.repository import Atspi, GLib
 
     window_of = {}  # (pid, title) -> window id; agent terminals each have their own process
     for w in windows:
@@ -85,18 +86,26 @@ def read_text(windows, lines=60):
             window_of[(int(pid) if pid.isdigit() else None, w["title"])] = w["id"]
     found = []
     desktop = Atspi.get_desktop(0)
+    Atspi.set_timeout(1500, -1)  # an app that doesn't answer mustn't hold up the read
+    terminal_pids = {pid for pid, _title in window_of}
     for i in range(desktop.get_child_count()):
         app = desktop.get_child_at_index(i)
-        if not app or app.get_name() != "xfce4-terminal":
+        # Only talk to terminal processes. The process id comes from the accessibility bus
+        # itself, so asking it never waits on an app; asking every app its name did, and some
+        # (an XFCE panel plugin) can take 15 s to answer.
+        if not app or app.get_process_id() not in terminal_pids:
             continue
-        for term in _terminals(app):
-            frame = _frame(term)
-            title = frame.get_name() if frame else ""
-            showing = term.get_state_set().contains(Atspi.StateType.SHOWING)
-            text = Atspi.Text.get_text(term, 0, Atspi.Text.get_character_count(term))
-            kept = text.rstrip().splitlines()[-lines:]
-            win = window_of.get((app.get_process_id(), title))
-            found.append({"window": win, "title": title, "visible_tab": showing,
-                          "text": "\n".join(kept)})
+        try:
+            for term in _terminals(app):
+                frame = _frame(term)
+                title = frame.get_name() if frame else ""
+                showing = term.get_state_set().contains(Atspi.StateType.SHOWING)
+                text = Atspi.Text.get_text(term, 0, Atspi.Text.get_character_count(term))
+                kept = text.rstrip().splitlines()[-lines:]
+                win = window_of.get((app.get_process_id(), title))
+                found.append({"window": win, "title": title, "visible_tab": showing,
+                              "text": "\n".join(kept)})
+        except GLib.Error:
+            continue  # this terminal didn't answer in time: report the others
     found.sort(key=lambda t: not t["visible_tab"])
     return found

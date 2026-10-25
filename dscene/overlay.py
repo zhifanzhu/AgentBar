@@ -1,4 +1,5 @@
-"""Transparent, click-through windows drawn on top of everything: captions and annotations."""
+"""Windows drawn on top of everything: click-through captions and annotations, and the
+small option-button popups (which take clicks but never keyboard focus)."""
 import math
 
 import cairo
@@ -48,11 +49,11 @@ class AnnotationLayer(Gtk.Window):
             GLib.timeout_add(int(seconds * 1000), lambda: self.remove([item_id]) and False)
         return item_id
 
-    def add_buttons(self, item_id, options, on_click):
+    def add_buttons(self, item_id, options, on_click, key_hint=None):
         """Clickable option buttons beside an item's text bubble; on_click(option)."""
         if item_id not in self.items:
             return
-        buttons = StepButtons(options, on_click)
+        buttons = StepButtons(options, on_click, key_hint=key_hint)
         bx, by, bw, bh = self._bubble_rect(self.items[item_id])
         w, h = buttons.get_preferred_size()[1].width, buttons.get_preferred_size()[1].height
         sw, sh = self.get_screen().get_width(), self.get_screen().get_height()
@@ -190,13 +191,18 @@ class StepButtons(Gtk.Window):
     """A row of option buttons that floats over the screen. It takes clicks but never keyboard
     focus (an override-redirect popup), so the user's keys keep going to their app."""
 
-    def __init__(self, options, on_click):
+    def __init__(self, options, on_click, question=None, key_hint=None):
+        """question: text shown before the buttons; key_hint: the key (if any) the host
+        maps to the first option, shown on its button."""
         super().__init__(type=Gtk.WindowType.POPUP)
         self.set_name("stepbuttons")
         box = Gtk.Box(spacing=6, margin=5)
+        if question:
+            box.pack_start(Gtk.Label(label=question, wrap=True, max_width_chars=60), False, False, 0)
         for i, option in enumerate(options):
-            button = Gtk.Button(label=f"{option}  ·  F4" if i == 0 else option)
+            button = Gtk.Button(label=f"{option}  ·  {key_hint}" if i == 0 and key_hint else option)
             button.set_can_focus(False)
+            button.set_valign(Gtk.Align.CENTER)  # don't stretch to a wrapped question's height
             button.get_style_context().add_class("option")
             button.connect("clicked", lambda _b, o=option: on_click(o))
             box.pack_start(button, False, False, 0)

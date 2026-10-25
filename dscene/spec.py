@@ -132,8 +132,8 @@ ENGINES = {"google": "https://www.google.com/search?hl=en&q=", "duckduckgo": "ht
 def search_url(text, engine=None):
     """A search (or ask) URL for text, on engine or the user's configured answer engine."""
     if engine is None:
-        import brain  # late import: the setting lives in the brain config
-        engine = brain.load_config().get("answer_engine", "duckduckgo")
+        from dscene import config
+        engine = config.load().get("answer_engine", "duckduckgo")
     # site: takes a domain only; "site:lu.ma/encode-club x" matches nothing, so keep the
     # path as plain words: "site:lu.ma encode-club x".
     text = re.sub(r"\bsite:([^\s/]+)/(\S*)", lambda m: f"site:{m[1]} {m[2].replace('/', ' ')}", text)

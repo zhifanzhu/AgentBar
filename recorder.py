@@ -22,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-RUNS = Path(__file__).resolve().parents[1] / "runs"
+RUNS = Path(__file__).resolve().parent / "runs"
 THUMB_WIDTH = 480
 
 

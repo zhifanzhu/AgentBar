@@ -20,4 +20,4 @@ Python packages (`requirements.txt`), in a venv that can see the system's GTK bi
 
 Models: a Gemini API key (`/key gemini KEY` in the bar), and optionally an OpenAI-compatible
 server with Holo3.1 for finding elements on screen (default `http://10.0.2.2:8000/v1`, set
-`grounding.url` in `~/.config/agentbar/brain.json`).
+`grounding.url` in `~/.config/dscene/config.json`).

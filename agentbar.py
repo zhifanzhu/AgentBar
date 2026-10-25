@@ -8,32 +8,31 @@ my desktop (twice: hide).
 On the user's own desktop the bar hides itself when it loses focus; while a
 scene is showing it stays, as the scene's control strip.
 
-The bar hosts the dscene MCP server (dscene/server.py). Requests go to the
-brain (brain.py), an agent that acts only through dscene tools, the same tools
-any other MCP client can use. Commands start with "/" (see /help).
+The bar hosts dscene: its Stage (dscene/stage.py) does everything on the desktop, and its
+MCP server (dscene/server.py) is how the brain (brain.py) acts, the same tools any other
+MCP client can use. The bar is dscene's Host (dscene/host.py): it reserves the top strip,
+shows the deck as cards and asks questions in its own window. Commands start with "/"
+(see /help).
 """
 import sys
 import threading
 import time
-from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-gi.require_version("GdkX11", "3.0")
-from gi.repository import Gdk, GdkX11, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 import brain  # noqa: E402
 import dscene.server  # noqa: E402
+from dscene import config as dscene_config  # noqa: E402
 from dscene import spec  # noqa: E402
 from dscene.adapters import impress  # noqa: E402
-from dscene.desktop import Desktop  # noqa: E402
-from dscene.recorder import RECORDER  # noqa: E402
-from overlay import AnnotationLayer, Caption  # noqa: E402
-from selector import RegionSelector  # noqa: E402
+from dscene.host import Host  # noqa: E402
+from dscene.stage import Stage, workarea  # noqa: E402
+from recorder import RECORDER  # noqa: E402
 
-CAPTURES = Path.home() / ".cache" / "agentbar" / "captures"
 HELP = ("? — search the text you selected (any app) · /search [WORDS] — search the selection or WORDS · "
         "/deck … — compare options as cards to flip through · "
         "/show me how to … — step-by-step guidance; the agent won't do it for you · "
@@ -52,21 +51,20 @@ CSS = b"""
 #bar button.option { padding: 2px 14px; border-radius: 8px; background: #f59f0a; color: #1c1d24; }
 #bar .reply { color: #ffffff; font-size: 16px; font-weight: bold; }
 #bar .status { color: #e0e2ea; font-size: 14px; }
-#stepbuttons { background: #1c1d24; }
-#stepbuttons button.option { padding: 4px 14px; border-radius: 8px; background: #f59f0a;
-                             color: #1c1d24; font-weight: bold; }
 #bar .question { color: #f5c46a; font-size: 14px; font-weight: bold; }
 """
 
 
-def workarea():
-    display = Gdk.Display.get_default()
-    monitor = display.get_primary_monitor() or display.get_monitor(0)
-    r = monitor.get_workarea()
-    return r.x, r.y, r.width, r.height
+def seed_dscene_config():
+    """First run of a dscene with its own config: carry over the settings agentBar kept in
+    brain.json before (grounding, answer engine, Gemini key)."""
+    if dscene_config.exists():
+        return
+    old = brain.load_config()
+    dscene_config.update(**{k: old[k] for k in ("grounding", "answer_engine", "gemini_api_key") if old.get(k)})
 
 
-class AgentBar(Gtk.ApplicationWindow):
+class AgentBar(Gtk.ApplicationWindow, Host):
     def __init__(self, app):
         super().__init__(application=app, title="Agent bar")
         self.set_name("bar")
@@ -77,22 +75,9 @@ class AgentBar(Gtk.ApplicationWindow):
         self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
         self.stick()  # on every workspace: focusing it must never switch workspaces
 
-        self.desktop = Desktop()
-        self.caption = Caption()
-        self.toaster = Caption()
-        self.annotations = AnnotationLayer(top=lambda: self.scene_area()[1] + 24)
-        self.toast_timer = None
-        self.current = None     # active scene index; None = the user's own desktop
+        self.stage = Stage(host=self)
         self.cards = []
-        self.preparing = False  # scene windows come and go: don't auto-hide meanwhile
         self.thinking = False   # the agent is working on a request
-        self.pending_ask = None  # done() callback while ask_user waits for an answer
-        self.quick_answer = None  # what F4 answers while that question waits (guide steps)
-        self.close_armed = False  # a /close kept pages on screen: the next one closes them
-        self.selected_at = 0.0  # when the user last selected text anywhere (X primary selection)
-        Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY).connect(
-            "owner-change", lambda *_: setattr(self, "selected_at", time.time()))
-        self.asked_at = 0.0
         self.agent = brain.Agent(on_event=lambda line: GLib.idle_add(self._progress, line))
 
         self.set_resizable(False)  # the window then shrinks back to fit whatever is shown
@@ -133,22 +118,98 @@ class AgentBar(Gtk.ApplicationWindow):
         GLib.idle_add(self._hide_empty)
 
     def _hide_empty(self):
-        if not self.pending_ask:
+        if not self.stage.pending_ask:
             self.ask_row.hide()
         return False
 
-    def scene_area(self):
-        x, y, w, h = workarea()
-        bar_h = self.get_allocated_height() if self.get_visible() else 0
-        return x, y + bar_h, w, h - bar_h
+    # -- dscene Host hooks (dscene/host.py) -------------------------------------------
+    def reserved_top(self):
+        return self.get_allocated_height() if self.get_visible() else 0
+
+    def quick_key(self):
+        return "F4"
+
+    def hide_chrome(self):
+        if not self.get_visible():
+            return False
+        self.dismiss(refocus=self.is_active())
+        return True
+
+    def deck_preparing(self, count):
+        self.status.set_text(f"{self.status.get_text()} · preparing {count} scenes…")
+        if not self.get_visible():
+            self.summon()
+
+    def deck_changed(self, scenes, took=None):
+        for child in self.cards_box.get_children():
+            child.destroy()
+        self.cards = []
+        if not scenes:
+            return
+        for i, s in enumerate(scenes):
+            card = Gtk.Button()
+            label = Gtk.Label()
+            label.set_markup(self._card_markup(s))
+            card.add(label)
+            card.get_style_context().add_class("card")
+            card.connect("clicked", lambda _b, i=i: self.user_go(i))
+            self.cards_box.pack_start(card, False, False, 0)
+            self.cards.append(card)
+        home = Gtk.Button(label="↩ My desktop")
+        home.connect("clicked", lambda _b: self.user_go(None))
+        self.cards_box.pack_end(home, False, False, 0)
+        self.cards_box.show_all()
+        self.status.set_text(f"{self.status.get_text().split(' · preparing')[0]} · "
+                             f"{len(scenes)} scenes ready in {took or 0:.1f}s · ←/→ to flip, Esc to go back")
+        self.present()  # hiding the preloaded windows can move focus away from us
+        if self.cards and not self.stage.pending_ask:
+            self.cards[0].grab_focus()
+
+    def deck_updated(self, index, scene):
+        RECORDER.op("agent", "dead_links_replaced", scenes=[scene.name])
+        if index < len(self.cards):
+            self.cards[index].get_child().set_markup(self._card_markup(scene))
+
+    def showing(self, index, raise_host=True):
+        for j, card in enumerate(self.cards):
+            ctx = card.get_style_context()
+            (ctx.add_class if j == index else ctx.remove_class)("active")
+        if raise_host:
+            self.present()
+
+    def ask(self, question, options):
+        """Show a question in the bar without taking keyboard focus from the user's app."""
+        self.question.set_text(question)
+        for option in options:
+            button = Gtk.Button(label=option)
+            button.get_style_context().add_class("option")
+            button.connect("clicked", lambda _b, o=option: self.stage.answer(o))
+            self.options_box.pack_start(button, False, False, 0)
+        self.entry.set_text("")
+        self.entry.set_placeholder_text("Press a button, or F4 to type an answer…")
+        if not self.get_visible():
+            self.set_focus_on_map(False)  # appear, but leave the keyboard where it is
+            self.show_all()
+            GLib.timeout_add(500, lambda: self.set_focus_on_map(True) or False)
+        self.ask_row.show_all()
+        return True
+
+    def ask_ended(self, answer, waited):
+        if answer is not None:
+            RECORDER.op("user", "answer", answer=answer, waited=waited)
+        for child in self.options_box.get_children():
+            child.destroy()
+        self.ask_row.hide()
+        self.entry.set_text("")
+        self.entry.set_placeholder_text(self.PLACEHOLDER)
 
     # -- showing / hiding ---------------------------------------------------
     def summon(self):
-        self.desktop.remember_focus()
+        self.stage.remember_focus()
         self.show_all()
         self.present()
-        if self.cards and not self.pending_ask:
-            self.cards[self.current or 0].grab_focus()
+        if self.cards and not self.stage.pending_ask:
+            self.cards[self.stage.current or 0].grab_focus()
         else:
             self.entry.grab_focus()
 
@@ -156,49 +217,17 @@ class AgentBar(Gtk.ApplicationWindow):
         """Hide the bar; refocus=True hands focus back to the user's window."""
         self.hide()
         if refocus:
-            self.desktop.refocus()
+            self.stage.refocus()
 
     def on_focus_out(self, *_):
         GLib.timeout_add(200, self._maybe_autohide)  # ignore transient focus moves
         return False
 
     def _maybe_autohide(self):
-        if (self.get_visible() and not self.is_active() and not self.preparing
-                and not self.pending_ask and self.current is None):
+        if (self.get_visible() and not self.is_active() and not self.stage.preparing
+                and not self.stage.pending_ask and self.stage.current is None):
             self.dismiss(refocus=False)  # focus already went where the user clicked
         return False
-
-    def toast(self, markup, seconds=3):
-        """A brief notice near the bottom of the screen, independent of the bar."""
-        if self.toast_timer:
-            GLib.source_remove(self.toast_timer)
-        _, y, _, h = workarea()
-        bottom = y + h - 40
-        if self.caption.get_visible():  # a scene caption is down there: go just above it
-            bottom = min(bottom, self.caption.get_position()[1] - 10)
-        self.toaster.show_centered(markup, bottom)
-        self.toast_timer = GLib.timeout_add(seconds * 1000, self._end_toast)
-
-    def copy_text(self, text):
-        """The clipboard (Ctrl+Shift+V); the VNC clipboard passes it on to the viewer. Not the
-        primary selection: that stays what the user selected (? and /search read it)."""
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clipboard.set_text(text, -1)
-        clipboard.store()
-        short = text if len(text) <= 28 else text[:27] + "…"
-        self.toast(f"Copied “{GLib.markup_escape_text(short)}” · Ctrl+Shift+V to paste", 4)
-
-    SELECTION_FRESH_S = 120  # older selections are probably not what the user means now
-
-    def read_selection(self, done):
-        """done({"text", "age_s"}) with the text the user selected last (in any app), or
-        {"text": None} when nothing was selected in the last couple of minutes."""
-        age = time.time() - self.selected_at
-        if not self.selected_at or age > self.SELECTION_FRESH_S:
-            done({"text": None, "age_s": None})
-            return
-        Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY).request_text(
-            lambda _c, text: done({"text": " ".join((text or "").split()) or None, "age_s": round(age)}))
 
     def search(self, words):
         """? and /search: open a web search for words, or for the selected text (short
@@ -215,25 +244,20 @@ class AgentBar(Gtk.ApplicationWindow):
                 query = f'"{query}" meaning'
             scene = spec.SceneSpec(name=query[:60], panes=[{"kind": "search", "query": query}])
             self.status.set_text(f"Searching {query[:80]}…")
-            self.apply_scene(scene, lambda result: self.status.set_text(
+            self.stage.apply_scene(scene, lambda result: self.status.set_text(
                 result.get("error") and f"Search failed: {result['error']}" or f"Searched: {query[:80]}"))
 
         if words:
             go({"text": None})
         else:
-            self.read_selection(go)
-
-    def _end_toast(self):
-        self.toaster.hide()
-        self.toast_timer = None
-        return False
+            self.stage.read_selection(go)
 
     # -- talking to the agent -----------------------------------------------
     def on_enter(self, entry):
         text = entry.get_text().strip()
-        if self.pending_ask:
+        if self.stage.pending_ask:
             if text:
-                self.answer(text)
+                self.stage.answer(text)
             return
         if not text:
             return
@@ -256,9 +280,9 @@ class AgentBar(Gtk.ApplicationWindow):
         entry.set_placeholder_text(f"“{text}”")
         cfg = brain.load_config()
         self.thinking = True
-        self.close_armed = False  # a new request: /close starts over
-        if not self.pending_ask:
-            self.annotations.remove()  # marks from the last request are done with
+        self.stage.close_armed = False  # a new request: /close starts over
+        if not self.stage.pending_ask:
+            self.stage.annotations.remove()  # marks from the last request are done with
         self.reply.set_text("")
         self.reply.hide()
         self.status.set_text(f"Thinking… ({brain.describe(cfg)})")
@@ -282,13 +306,14 @@ class AgentBar(Gtk.ApplicationWindow):
         self.reply.show()
         self.status.set_text(f"{took:.1f}s · {model}")
         if not self.get_visible():
-            self.toast(GLib.markup_escape_text(reply or "Done."), 5)
+            self.stage.toast(GLib.markup_escape_text(reply or "Done."), 5)
 
     def command(self, text):
         args = text.split()
         cmd = args[0].lower()
         RECORDER.op("user", "command", command=cmd)  # never the arguments: /key carries a secret
         cfg = brain.load_config()
+        scene_cfg = dscene_config.load()
         if cmd == "/model" and len(args) >= 2:
             provider = args[1].lower()
             if provider not in cfg["models"]:
@@ -308,19 +333,18 @@ class AgentBar(Gtk.ApplicationWindow):
         elif cmd == "/key" and len(args) == 3 and args[1].lower() == "gemini":
             cfg["gemini_api_key"] = args[2]
             brain.save_config(cfg)
-            self.status.set_text(f"Gemini key saved to {brain.CONFIG} · Brain: {brain.describe(cfg)}")
+            dscene_config.update(gemini_api_key=args[2])  # dscene's Gemini grounding uses it too
+            self.status.set_text(f"Gemini key saved · Brain: {brain.describe(cfg)}")
         elif cmd == "/ground" and len(args) == 2 and args[1].lower() in ("holo", "gemini"):
-            cfg["grounding"]["provider"] = args[1].lower()
-            brain.save_config(cfg)
+            dscene_config.update(grounding={"provider": args[1].lower()})
             self.status.set_text(f"find_element now uses {args[1].lower()}")
         elif cmd == "/ground":
-            self.status.set_text(f"find_element uses {cfg['grounding']['provider']} · /ground holo|gemini")
+            self.status.set_text(f"find_element uses {scene_cfg['grounding']['provider']} · /ground holo|gemini")
         elif cmd == "/answers" and len(args) == 2 and args[1].lower() in spec.ENGINES:
-            cfg["answer_engine"] = args[1].lower()
-            brain.save_config(cfg)
+            dscene_config.update(answer_engine=args[1].lower())
             self.status.set_text(f"Questions now open in {args[1].lower()}")
         elif cmd == "/answers":
-            self.status.set_text(f"Questions open in {cfg.get('answer_engine', 'duckduckgo')} · "
+            self.status.set_text(f"Questions open in {scene_cfg['answer_engine']} · "
                                  f"/answers {'|'.join(spec.ENGINES)}")
         elif cmd == "/remember" and len(args) >= 2:
             brain.remember(text.split(None, 1)[1])
@@ -333,7 +357,7 @@ class AgentBar(Gtk.ApplicationWindow):
             self.agent.reset()
             self.status.set_text("New conversation")
         elif cmd == "/shot":
-            self.select_region("Drag to select · Esc to cancel", self._shot_selected)
+            self.stage.select_region("Drag to select · Esc to cancel", self._shot_selected)
         else:
             self.status.set_text(HELP)
         self.entry.set_text("")  # never leave a key sitting in the entry
@@ -347,170 +371,6 @@ class AgentBar(Gtk.ApplicationWindow):
         GLib.idle_add(self.status.set_text,
                       f"{cfg['provider']} models: {', '.join(names)}\nSwitch with /model {cfg['provider']} NAME")
 
-    # -- dscene: called by dscene.server on the GTK thread ------------------------
-    def dscene_state(self):
-        return {"deck": [{"index": i, "name": s.name, "note": s.note, "layout": s.layout,
-                          "panes": s.urls()} for i, s in enumerate(self.desktop.scenes)],
-                "showing": self.current,
-                "pane_rects": [list(r) for r in self.desktop.rects],
-                "annotations": [{"id": i, **{k: v for k, v in it.items()}}
-                                for i, it in self.annotations.items.items()],
-                "asking": self.question.get_text() if self.pending_ask else None,
-                "screen": list(workarea()), "bar_visible": self.get_visible()}
-
-    def screenshot_png(self, rect=None, fmt="png"):
-        """Screen pixels (all, or rect) as PNG, or JPEG for smaller model inputs; plus (w, h)."""
-        root = Gdk.get_default_root_window()
-        x, y, w, h = rect or (0, 0, root.get_width(), root.get_height())
-        pixbuf = Gdk.pixbuf_get_from_window(root, x, y, w, h)
-        keys, values = (["quality"], ["85"]) if fmt == "jpeg" else ([], [])
-        ok, data = pixbuf.save_to_bufferv(fmt, keys, values)
-        return bytes(data), (w, h)
-
-    def screenshot_window(self, win_id, fmt="jpeg"):
-        """One window's own pixels by X id: right even when other windows cover it."""
-        win = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), int(win_id, 16))
-        pixbuf = Gdk.pixbuf_get_from_window(win, 0, 0, win.get_width(), win.get_height()) if win else None
-        if pixbuf is None:
-            raise ValueError(f"window {win_id} has no pixels (minimized or gone?)")
-        keys, values = (["quality"], ["85"]) if fmt == "jpeg" else ([], [])
-        return bytes(pixbuf.save_to_bufferv(fmt, keys, values)[1])
-
-    def apply_scene(self, scene, done):
-        """set_scene: reconcile the desktop towards scene in a worker thread, then report."""
-        self.preparing = True
-        area = self.scene_area()
-
-        def work():
-            try:
-                result = {"scene": scene.name, "panes": self.desktop.set_scene(scene, area)}
-            except Exception as e:  # noqa: BLE001
-                result = {"scene": scene.name, "error": f"{type(e).__name__}: {e}"}
-            GLib.idle_add(finish, result)
-
-        def finish(result):
-            self.preparing = False
-            self.current = None  # a set scene isn't one of the deck's cards
-            for card in self.cards:
-                card.get_style_context().remove_class("active")
-            if scene.caption and self.desktop.rects:
-                x, y, w, h = self.desktop.rects[-1]
-                self.caption.show_at(f"{GLib.markup_escape_text(scene.name)}\n<span size='small'>"
-                                     f"{GLib.markup_escape_text(scene.caption)}</span>", x + 24, y + h - 24, w - 48)
-            else:
-                self.caption.hide()
-            if self.annotations.items:
-                self.annotations.refresh()
-            done(result)
-            return False
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def present_deck(self, scenes, show_first, done):
-        """Build the deck's windows in the background, then show its cards (and scene 0)."""
-        self.preparing = True
-        self.status.set_text(f"{self.status.get_text()} · preparing {len(scenes)} scenes…")
-        if not self.get_visible():
-            self.summon()
-
-        def work():
-            t0 = time.perf_counter()
-            try:
-                live, swapped = spec.with_live_links(scenes)
-                self.desktop.prepare(live)
-            except Exception as e:  # noqa: BLE001
-                GLib.idle_add(self._prepared_failed, e, done)
-                return
-            GLib.idle_add(self._prepared, live, swapped, show_first, time.perf_counter() - t0, done)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _prepared_failed(self, error, done):
-        self.preparing = False
-        self.status.set_text(f"Failed to prepare scenes: {error}")
-        done({"error": str(error)})
-
-    def _prepared(self, scenes, swapped, show_first, took, done):
-        self.preparing = False
-        self.show_cards(scenes, took)
-        if show_first:
-            self.go(0)
-        self._check_links()
-        done({"deck": [{"index": i, "name": s.name, "note": s.note} for i, s in enumerate(scenes)],
-              "showing": self.current, "links_replaced_by_search": swapped})
-
-    def show_scene(self, index):
-        if index is not None and not 0 <= index < len(self.desktop.scenes):
-            raise ValueError(f"no scene {index}; the deck has {len(self.desktop.scenes)}")
-        self.go(index)
-        return {"showing": self.current}
-
-    def ask(self, question, options, quick, done):
-        """Show a question in the bar without taking keyboard focus from the user's app.
-        quick: the answer F4 gives (None: F4 focuses the bar to type one). A quick question
-        (a tutorial step) isn't shown in the bar: its buttons sit beside the step's mark."""
-        self.ask_cancel()
-        self.pending_ask = done
-        self.quick_answer = quick
-        self.asked_at = time.time()
-        self.desktop.remember_focus()  # where their keys are going now, and go back to
-        if quick:
-            return
-        self.question.set_text(question)
-        for option in options:
-            button = Gtk.Button(label=option)
-            button.get_style_context().add_class("option")
-            button.connect("clicked", lambda _b, o=option: self.answer(o))
-            self.options_box.pack_start(button, False, False, 0)
-        self.entry.set_text("")
-        self.entry.set_placeholder_text(f"Press a button or F4 for {quick}, or click here to type…" if quick
-                                        else "Press a button, or F4 to type an answer…")
-        if not self.get_visible():
-            self.set_focus_on_map(False)  # appear, but leave the keyboard where it is
-            self.show_all()
-            GLib.timeout_add(500, lambda: self.set_focus_on_map(True) or False)
-        self.ask_row.show_all()
-
-    def step_mode(self):
-        """Get out of the way for a tutorial step: the bar must not cover what gets marked."""
-        if self.get_visible():
-            self.dismiss(refocus=self.is_active())
-
-    def answer(self, text):
-        if not self.pending_ask:
-            return  # already answered (e.g. F4 and a click together)
-        done, self.pending_ask = self.pending_ask, None
-        RECORDER.op("user", "answer", answer=text, waited=round(time.time() - self.asked_at, 1))
-        self.ask_cancel()
-        if done:
-            self.desktop.refocus()  # hand the keyboard back to the user's app
-            done(text)
-
-    def ask_cancel(self):
-        self.pending_ask = None
-        self.quick_answer = None
-        for child in self.options_box.get_children():
-            child.destroy()
-        self.ask_row.hide()
-        self.entry.set_text("")
-        self.entry.set_placeholder_text(self.PLACEHOLDER)
-
-    def select_region(self, prompt, done):
-        """done((png_path, rect)) after the user drags a box, or done((None, None))."""
-        self.hide()
-        self.toast(GLib.markup_escape_text(prompt), 3)
-
-        def selected(pixbuf, rect):
-            if pixbuf is None:
-                done((None, None))
-                return
-            CAPTURES.mkdir(parents=True, exist_ok=True)
-            path = CAPTURES / time.strftime("capture-%Y%m%d-%H%M%S.png")
-            pixbuf.savev(str(path), "png", [], [])
-            done((str(path), rect))
-
-        GLib.timeout_add(250, lambda: RegionSelector(selected) and False)  # let the bar vanish first
-
     # -- /shot: screenshot -> slide without the agent -----------------------------
     def _shot_selected(self, result):
         path, _ = result
@@ -518,148 +378,62 @@ class AgentBar(Gtk.ApplicationWindow):
             self.summon()
             self.status.set_text("Screenshot cancelled")
             return
-        self.toast("Adding to Impress…", seconds=60)
+        self.stage.toast("Adding to Impress…", seconds=60)
         threading.Thread(target=self._insert_slide, args=(path,), daemon=True).start()
 
     def _insert_slide(self, path):
         try:
             info = impress.insert_image(path)
         except Exception as e:  # noqa: BLE001 - show any failure in the notice
-            GLib.idle_add(self.toast, f"Couldn't add to Impress: {GLib.markup_escape_text(str(e))}", 6)
+            GLib.idle_add(self.stage.toast, f"Couldn't add to Impress: {GLib.markup_escape_text(str(e))}", 6)
             return
-        GLib.idle_add(self.toast, f"Added as slide {info['slide']} of {info['total']}"
-                                  "  <span size='small'>· Ctrl+Z in Impress to undo</span>")
+        GLib.idle_add(self.stage.toast, f"Added as slide {info['slide']} of {info['total']}"
+                                        "  <span size='small'>· Ctrl+Z in Impress to undo</span>")
 
     # -- cards and switching -------------------------------------------------
-    def show_cards(self, scenes, took):
-        self.current = None
-        self.caption.hide()
-        for child in self.cards_box.get_children():
-            child.destroy()
-        self.cards = []
-        for i, s in enumerate(scenes):
-            card = Gtk.Button()
-            label = Gtk.Label()
-            label.set_markup(self._card_markup(s))
-            card.add(label)
-            card.get_style_context().add_class("card")
-            card.connect("clicked", lambda _b, i=i: self.user_go(i))
-            self.cards_box.pack_start(card, False, False, 0)
-            self.cards.append(card)
-        home = Gtk.Button(label="↩ My desktop")
-        home.connect("clicked", lambda _b: self.user_go(None))
-        self.cards_box.pack_end(home, False, False, 0)
-        self.cards_box.show_all()
-        self.status.set_text(f"{self.status.get_text().split(' · preparing')[0]} · "
-                             f"{len(scenes)} scenes ready in {took:.1f}s · ←/→ to flip, Esc to go back")
-        self.present()  # hiding the preloaded windows can move focus away from us
-        if self.cards and not self.pending_ask:
-            self.cards[0].grab_focus()
-
     def close_deck(self):
-        """/close, in two steps when deck pages are on screen: the first closes the deck's
-        pages out of sight but keeps what the user is looking at; the next closes that too.
-        Only deck pages: never the user's tabs, nor pages they asked for in other requests."""
-        final, self.close_armed = self.close_armed, False
-        RECORDER.op("user", "close_deck", scenes=len(self.cards), final=final)
-        self.caption.hide()
-        for child in self.cards_box.get_children():
-            child.destroy()
-        self.cards, self.current = [], None
+        """/close: dscene closes the deck, in two steps when deck pages are on screen."""
+        RECORDER.op("user", "close_deck", scenes=len(self.cards), final=self.stage.close_armed)
         self.status.set_text("Closing…")
 
-        def work():
-            try:
-                kept = self.desktop.close_deck(final)
-                note = (f"Kept “{kept[0][:40]}”{f' and {len(kept) - 1} more' if len(kept) > 1 else ''} "
-                        "on screen · /close again to close it" if kept
-                        else "Deck closed · your tabs and pages you asked for stay open")
-            except Exception as e:  # noqa: BLE001 - show the failure in the bar
-                kept, note = [], f"Closing failed: {e}"
-            GLib.idle_add(self._closed, bool(kept), note)
+        def closed(result):
+            kept = result.get("kept_on_screen") or []
+            self.status.set_text(
+                f"Closing failed: {result['error']}" if "error" in result
+                else f"Kept “{kept[0][:40]}”{f' and {len(kept) - 1} more' if len(kept) > 1 else ''} "
+                     "on screen · /close again to close it" if kept
+                else "Deck closed · your tabs and pages you asked for stay open")
 
-        threading.Thread(target=work, daemon=True).start()
-
-    def _closed(self, kept_some, note):
-        self.close_armed = kept_some  # the next /close closes what was kept
-        self.status.set_text(note)
-        if not kept_some:
-            self.desktop.refocus()
-        return False
+        self.stage.close_deck(closed)
 
     @staticmethod
     def _card_markup(scene):
         return (f"<b>{GLib.markup_escape_text(scene.name)}</b>\n"
                 f"<small>{GLib.markup_escape_text(scene.note)}</small>")
 
-    def _check_links(self):
-        """In the background, once the deck's pages have loaded: swap pages that don't exist
-        for a site search, and say so on their cards."""
-        scenes = self.desktop.scenes
-
-        def work():
-            try:
-                changed = self.desktop.fix_dead_links()
-            except Exception as e:  # noqa: BLE001 - a failed check just leaves the pages as they are
-                print("link check failed:", e, flush=True)
-                return
-            if changed:
-                GLib.idle_add(self._links_fixed, scenes, changed)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _links_fixed(self, scenes, changed):
-        if self.desktop.scenes is not scenes:
-            return False  # another deck since
-        RECORDER.op("agent", "dead_links_replaced", scenes=[scenes[i].name for i in changed])
-        for i in changed:
-            self.cards[i].get_child().set_markup(self._card_markup(scenes[i]))
-        return False
-
     def user_go(self, i):
         """The user flipped scenes (card or key): record it, then show."""
-        RECORDER.op("user", "swap_scene", index=i, scene=self.desktop.scenes[i].name if i is not None else None)
-        self.go(i)
-
-    def go(self, i):
-        if i is None:
-            self.desktop.restore()
-            self.caption.hide()
-        else:
-            rects = self.desktop.apply(i, self.scene_area())
-            s = self.desktop.scenes[i]
-            text = s.caption or s.note
-            if text:
-                x, y, w, h = rects[-1]
-                self.caption.show_at(f"{GLib.markup_escape_text(s.name)}\n"
-                                     f"<span size='small'>{GLib.markup_escape_text(text)}</span>",
-                                     x + 24, y + h - 24, w - 48)
-            else:
-                self.caption.hide()
-        self.current = i
-        for j, card in enumerate(self.cards):
-            ctx = card.get_style_context()
-            (ctx.add_class if j == i else ctx.remove_class)("active")
-        if self.annotations.items:
-            self.annotations.refresh()  # keep annotations above the raised scene windows
-        self.present()
+        scenes = self.stage.desktop.scenes
+        RECORDER.op("user", "swap_scene", index=i, scene=scenes[i].name if i is not None else None)
+        self.stage.show(i)
 
     def on_key(self, _w, event):
         key = event.keyval
         if key == Gdk.KEY_Escape:
-            if self.annotations.items and not self.pending_ask:
-                self.annotations.remove()  # first Esc: clear the agent's marks
+            if self.stage.annotations.items and not self.stage.pending_ask:
+                self.stage.annotations.remove()  # first Esc: clear the agent's marks
                 return True
-            if self.pending_ask:
-                self.desktop.refocus()  # Esc never cancels the agent: it hands the keyboard back
-            elif self.current is None:
+            if self.stage.pending_ask:
+                self.stage.refocus()  # Esc never cancels the agent: it hands the keyboard back
+            elif self.stage.current is None:
                 self.dismiss(refocus=True)
             else:
                 self.user_go(None)
             return True
         if self.cards and not self.entry.has_focus() and key in (Gdk.KEY_Left, Gdk.KEY_Right):
             step = 1 if key == Gdk.KEY_Right else -1
-            start = -1 if self.current is None and step == 1 else (self.current or 0)
+            current = self.stage.current
+            start = -1 if current is None and step == 1 else (current or 0)
             self.user_go((start + step) % len(self.cards))
             return True
         typing = Gdk.keyval_to_unicode(key) >= 32 and not (
@@ -680,13 +454,16 @@ class App(Gtk.Application):
             css.load_from_data(CSS)
             Gtk.StyleContext.add_provider_for_screen(
                 Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            seed_dscene_config()
             self.win = AgentBar(self)
-            print("dscene listening on", dscene.server.start(self.win), flush=True)
+            print("dscene listening on", dscene.server.start(self.win.stage), flush=True)
             self.win.summon()
-        elif self.win.pending_ask and self.win.quick_answer:
-            self.win.answer(self.win.quick_answer)  # F4 during a tutorial step = Done
+            return
+        stage = self.win.stage
+        if stage.pending_ask and stage.quick_answer:
+            stage.answer(stage.quick_answer)  # F4 during a tutorial step = Done
         elif self.win.get_visible() and self.win.is_active():
-            self.win.dismiss(refocus=self.win.current is None)
+            self.win.dismiss(refocus=stage.current is None)
         else:  # hidden, or visible while the user works in another window
             self.win.summon()
 

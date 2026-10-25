@@ -5,7 +5,8 @@ Search on Gemini), calls them, gets the results back, and finishes with a short
 reply for the bar. The conversation carries over between requests until reset().
 
 Providers:
-  gemini  Google Gemini API (Interactions endpoint); history is kept server-side
+  gemini  Google Gemini API (Interactions endpoint, store: false); the history is kept here
+          and sent with each call
   local   any OpenAI-compatible server with tool calling, e.g. the vLLM server on vast
 
 Config lives in ~/.config/agentbar/brain.json; edit it by hand or with the bar's
@@ -22,7 +23,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from dscene.recorder import RECORDER
+from dscene import config as dscene_config
+from recorder import RECORDER
 
 CONFIG = Path.home() / ".config" / "agentbar" / "brain.json"
 DEFAULTS = {
@@ -30,13 +32,7 @@ DEFAULTS = {
     "models": {"gemini": "gemini-3.6-flash", "local": "holo3-1-9b"},
     "local_url": "http://10.0.2.2:8000/v1",
     "gemini_api_key": "",
-    # find_element: holo = local Holo on vast's GPU (~0.6 s); gemini = a Gemini call per lookup
-    "grounding": {"provider": "holo", "url": "http://10.0.2.2:8000/v1", "model": "holo3-1-9b",
-                  "gemini_model": "gemini-3.6-flash"},
     "max_steps": 16,
-    # Where questions open: duckduckgo (default: vast's EU IP gets a Google consent wall),
-    # google, bing, chatgpt, perplexity.
-    "answer_engine": "duckduckgo",
     # minimal is fastest (gemini-3.6-flash: ~1.8 s per step vs ~4.2 s for 3.8-flash at low);
     # models without it (3.8-flash, 4-argon) fall back to low automatically.
     "thinking_level": "minimal",
@@ -85,27 +81,21 @@ def remember(note):
         f.write(f"- {note.strip()}\n")
 
 
-def system_prompt(request=""):
+def system_prompt(request="", apps=""):
     """The prompt layers for one request (see prompts/README.md): SYSTEM.md, ABOUT.md with
-    the current settings, the user's USER.md, and notes for the apps that are open or named
-    in the request."""
-    from dscene.desktop import list_windows  # late: dscene imports brain
-
-    cfg = load_config()
+    the current settings, the user's USER.md, and notes for the apps that are on screen
+    (`apps`: words from the scene captured at the start of the request) or named in it."""
+    cfg, scene_cfg = load_config(), dscene_config.load()
     settings = (f"Settings now: brain {cfg['provider']} / {cfg['models'][cfg['provider']]}; "
-                f"finding elements: {cfg['grounding']['provider']}; "
-                f"web answers open in: {cfg.get('answer_engine') or 'duckduckgo'}.")
+                f"finding elements: {scene_cfg['grounding']['provider']}; "
+                f"web answers open in: {scene_cfg['answer_engine']}.")
     parts = [(PROMPTS / "SYSTEM.md").read_text().strip(), (PROMPTS / "ABOUT.md").read_text().strip(),
              settings]
     notes = user_notes()
     if notes:
         parts.append("About the user (their own notes):\n" + notes)
-    try:
-        apps = " ".join(w["app"].lower() for w in list_windows())
-    except Exception:  # noqa: BLE001 - no window list: go by the request alone
-        apps = ""
     for note in sorted((PROMPTS / "apps").glob("*.md")):
-        if note.stem in apps or note.stem in request.lower():
+        if note.stem in apps.lower() or note.stem in request.lower():
             parts.append(f"Notes for {note.stem}:\n" + note.read_text().strip())
     return "\n\n".join(parts)
 
@@ -235,6 +225,7 @@ class Agent:
         self.pending = None      # a checkpoint being captured while the model thinks
         self.mode = "auto"       # or "teach" (/show) or "deck" (/deck), for the current request
         self.screens_set = 0
+        self.scene_apps = ""     # what's on screen at the start of the request (app notes)
 
     def run(self, text, cfg=None, mode="auto"):
         """Handle one request; returns the model's final reply. Blocking. Recorded as a run.
@@ -290,6 +281,9 @@ class Agent:
         except Exception:  # noqa: BLE001 - recording must never break a request
             pass
         RECORDER.checkpoint(trigger, scene, jpeg, error, seq)
+        if trigger == "start":  # which apps are on screen, for the app notes in the prompt
+            self.scene_apps = " ".join(f"{p.get('kind', '')} {p.get('app') or ''} {p.get('title') or ''}"
+                                       for p in (scene or {}).get("panes", []))
 
     async def _settle(self):
         """Wait for a checkpoint still being captured, so it never mixes in the next op."""
@@ -358,7 +352,7 @@ class Agent:
         declared = [{"type": "function", **t} for t in tools] + [{"type": "google_search"}]
         self._forget_old_images()
         self.history.append({"type": "user_input", "content": [{"type": "text", "text": text}]})
-        system = await asyncio.to_thread(system_prompt, text)
+        system = await asyncio.to_thread(system_prompt, text, self.scene_apps)
         model = cfg["models"]["gemini"]
         level = THINKING_FALLBACK.get(model, cfg["thinking_level"])
         for step in range(cfg["max_steps"]):
@@ -409,7 +403,7 @@ class Agent:
 
     async def _openai(self, cfg, text, tools, dscene):
         declared = [{"type": "function", "function": t} for t in tools]
-        system = {"role": "system", "content": await asyncio.to_thread(system_prompt, text)}
+        system = {"role": "system", "content": await asyncio.to_thread(system_prompt, text, self.scene_apps)}
         if self.messages:
             self.messages[0] = system  # this request's prompt layers
         else:
