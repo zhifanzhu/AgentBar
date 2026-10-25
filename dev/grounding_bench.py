@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare grounding providers (find_element) on the current screen: speed, and how far
 apart their answers are. Run in the VM session:
-    ~/.venvs/agentbar/bin/python dev/grounding_bench.py ["description" ...]
+    ~/.venvs/scenebar/bin/python dev/grounding_bench.py ["description" ...]
 """
 import statistics
 import sys

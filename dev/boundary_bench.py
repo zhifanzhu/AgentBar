@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Time dscene tools over MCP, the way the brain calls them: median and slowest of N calls.
-Used to compare before/after moving code across the dscene / agentBar boundary.
-Run in the VM while the bar is up:  ~/.venvs/agentbar/bin/python dev/boundary_bench.py [N]
+Used to compare before/after moving code across the dscene / SceneBar boundary.
+Run in the VM while the bar is up:  ~/.venvs/scenebar/bin/python dev/boundary_bench.py [N]
 It shows a test page in the agent's first browser window and draws (then removes) a label.
 """
 import asyncio

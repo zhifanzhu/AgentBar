@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Call dscene tools from the command line (an MCP client). Run in the VM:
-    ~/.venvs/agentbar/bin/python dev/dscene_call.py               # list tools
-    ~/.venvs/agentbar/bin/python dev/dscene_call.py get_scene
-    ~/.venvs/agentbar/bin/python dev/dscene_call.py toast '{"text": "hi"}'
+    ~/.venvs/scenebar/bin/python dev/dscene_call.py               # list tools
+    ~/.venvs/scenebar/bin/python dev/dscene_call.py get_scene
+    ~/.venvs/scenebar/bin/python dev/dscene_call.py toast '{"text": "hi"}'
 """
 import asyncio
 import json

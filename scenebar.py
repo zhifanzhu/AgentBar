@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Agent bar prototype: talk to an LLM agent that controls desktop scenes through dscene.
+"""SceneBar: talk to an LLM agent that controls desktop scenes through dscene.
 
-F4 (bin/agentbar-toggle) summons the bar, or hides it if it's already focused; while a
+F4 (bin/scenebar-toggle) summons the bar, or hides it if it's already focused; while a
 tutorial step waits, F4 answers Done instead.
 Keys: Enter = ask / answer, ←/→ = flip scenes, Esc = clear the agent's marks, else back to
 my desktop (twice: hide).
@@ -56,7 +56,7 @@ CSS = b"""
 
 
 def seed_dscene_config():
-    """First run of a dscene with its own config: carry over the settings agentBar kept in
+    """First run of a dscene with its own config: carry over the settings the bar kept in
     brain.json before (grounding, answer engine, Gemini key)."""
     if dscene_config.exists():
         return
@@ -64,9 +64,9 @@ def seed_dscene_config():
     dscene_config.update(**{k: old[k] for k in ("grounding", "answer_engine", "gemini_api_key") if old.get(k)})
 
 
-class AgentBar(Gtk.ApplicationWindow, Host):
+class SceneBar(Gtk.ApplicationWindow, Host):
     def __init__(self, app):
-        super().__init__(application=app, title="Agent bar")
+        super().__init__(application=app, title="SceneBar")
         self.set_name("bar")
         self.set_decorated(False)
         self.set_keep_above(True)
@@ -445,7 +445,7 @@ class AgentBar(Gtk.ApplicationWindow, Host):
 
 class App(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="dev.agentbar.Prototype")
+        super().__init__(application_id="dev.scenebar.SceneBar")
         self.win = None
 
     def do_activate(self):
@@ -455,7 +455,7 @@ class App(Gtk.Application):
             Gtk.StyleContext.add_provider_for_screen(
                 Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
             seed_dscene_config()
-            self.win = AgentBar(self)
+            self.win = SceneBar(self)
             print("dscene listening on", dscene.server.start(self.win.stage), flush=True)
             self.win.summon()
             return

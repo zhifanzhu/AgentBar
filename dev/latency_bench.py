@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Time one agent-style Gemini call (all dscene tools + a screenshot) on several models.
-Run in the VM while the bar is up:  ~/.venvs/agentbar/bin/python dev/latency_bench.py [image.jpg]
+Run in the VM while the bar is up:  ~/.venvs/scenebar/bin/python dev/latency_bench.py [image.jpg]
 Tool calls are not executed; only the model's response time is measured."""
 import asyncio
 import base64

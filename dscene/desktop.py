@@ -4,6 +4,8 @@ Browser panes go into the agent's Chromium slots (adapters/browser.py); app pane
 the user's own windows, restored by their adapters (adapters/blender.py, impress.py,
 window.py). A deck preloads its browser tabs, so swapping scenes is only tab activation.
 """
+import os
+import re
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
@@ -177,8 +179,9 @@ class Desktop:
     def remember_focus(self):
         """Note the user's focused window (unless it's one of ours) to return to later."""
         active = sh("xdotool", "getactivewindow").strip()
-        # By WM_CLASS, not id: scene windows can outlive a restart of the bar.
-        if active and not sh("xdotool", "getwindowclassname", active).lower().startswith("agentbar"):
+        # Slots by WM_CLASS, not id: they can outlive a restart of the bar.
+        if active and not is_ours(sh("xdotool", "getwindowclassname", active),
+                                  sh("xdotool", "getwindowpid", active)):
             self.saved_focus = active
 
     def refocus(self):
@@ -186,9 +189,15 @@ class Desktop:
             sh("xdotool", "windowactivate", self.saved_focus)
 
 
+def is_ours(res_class, pid):
+    """Our own windows: the agent's Chromium slots, and the windows of the app hosting dscene
+    (the bar, its overlays), which share this process."""
+    return res_class.strip().startswith("dscene-") or pid.strip() == str(os.getpid())
+
+
 def list_windows(current_workspace=False):
     """Normal top-level windows, bottom of the stack first: id, app class, title, rect,
-    workspace, minimized, ours (the bar's own windows), slot (which pane slot, if any)."""
+    workspace, minimized, ours (the agent's slots and the host app's own windows), slot (which pane slot, if any)."""
     stacking = sh("xprop", "-root", "_NET_CLIENT_LIST_STACKING").split("#")[-1]
     order = {int(w, 16): i for i, w in enumerate(stacking.replace(",", " ").split())}
     here = sh("xdotool", "get_desktop").strip()
@@ -205,12 +214,13 @@ def list_windows(current_workspace=False):
         if current_workspace and workspace != here:
             continue
         res_class = wm_class.strip().split(".")[-1]  # wmctrl pads the column
-        state = sh("xprop", "-id", win_id, "_NET_WM_STATE")
+        state = sh("xprop", "-id", win_id, "_NET_WM_STATE", "_NET_WM_PID")
+        pid = re.search(r"_NET_WM_PID\(CARDINAL\) = (\d+)", state)
         rect = frame_rect(win_id) or [int(x), int(y), int(w), int(h)]
         out.append({"id": win_id, "app": res_class, "title": title,
                     "rect": rect, "workspace": int(workspace),
                     "minimized": "_NET_WM_STATE_HIDDEN" in state,
                     "maximized": "_NET_WM_STATE_MAXIMIZED_VERT" in state and "_NET_WM_STATE_MAXIMIZED_HORZ" in state,
-                    "ours": res_class.lower().startswith("agentbar"),
-                    "slot": res_class[len("agentbar-"):] if res_class.startswith("agentbar-pane") else None})
+                    "ours": is_ours(res_class, pid.group(1) if pid else ""),
+                    "slot": res_class[len("dscene-"):] if res_class.startswith("dscene-pane") else None})
     return sorted(out, key=lambda w: order.get(int(w["id"], 16), -1))

@@ -1,4 +1,4 @@
-"""The agent bar's brain: an LLM agent that acts on the desktop through dscene (MCP).
+"""SceneBar's brain: an LLM agent that acts on the desktop through dscene (MCP).
 
 Each request runs a tool loop: the model sees every dscene tool (plus Google
 Search on Gemini), calls them, gets the results back, and finishes with a short
@@ -9,7 +9,7 @@ Providers:
           and sent with each call
   local   any OpenAI-compatible server with tool calling, e.g. the vLLM server on vast
 
-Config lives in ~/.config/agentbar/brain.json; edit it by hand or with the bar's
+Config lives in ~/.config/scenebar/brain.json; edit it by hand or with the bar's
 /model and /key commands. GEMINI_API_KEY in the environment overrides the stored key.
 """
 import asyncio
@@ -26,7 +26,7 @@ from pathlib import Path
 from dscene import config as dscene_config
 from recorder import RECORDER
 
-CONFIG = Path.home() / ".config" / "agentbar" / "brain.json"
+CONFIG = Path.home() / ".config" / "scenebar" / "brain.json"
 DEFAULTS = {
     "provider": "gemini",
     "models": {"gemini": "gemini-3.6-flash", "local": "holo3-1-9b"},
@@ -60,7 +60,7 @@ CHANGES_DESKTOP = {"set_scene", "set_deck", "swap_scene", "guide_step", "insert_
 
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 USER_NOTES = CONFIG.parent / "USER.md"
-USER_TEMPLATE = """<!-- About you, for the agent bar: who you are, where you are, your preferences.
+USER_TEMPLATE = """<!-- About you, for SceneBar: who you are, where you are, your preferences.
 Sent to the model with every request: keep it short and keep secrets out.
 /remember TEXT in the bar adds a line. Lines inside these comment marks are not sent. -->
 """

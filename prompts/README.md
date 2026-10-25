@@ -1,11 +1,11 @@
 # Prompt layers
 
-What the agent bar's model is told, assembled for every request (`brain.system_prompt`):
+What SceneBar's model is told, assembled for every request (`brain.system_prompt`):
 
-1. `SYSTEM.md`: how the agent bar works and its rules. Versioned with the code.
-2. `ABOUT.md` plus the current settings (brain model, grounding, answer engine): what agentBar
+1. `SYSTEM.md`: how SceneBar works and its rules. Versioned with the code.
+2. `ABOUT.md` plus the current settings (brain model, grounding, answer engine): what SceneBar
    is, so it can answer questions about itself without searching the web.
-3. `~/.config/agentbar/USER.md`: the user's own notes about themselves and their preferences;
+3. `~/.config/scenebar/USER.md`: the user's own notes about themselves and their preferences;
    `/remember TEXT` in the bar appends a line. Can't loosen the boundaries: those (no clicking,
    no running commands) are enforced in code.
 4. `apps/<name>.md`: tips for one app, sent only when a window of that app is open or the

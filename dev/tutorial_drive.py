@@ -25,7 +25,7 @@ def vm(cmd):
 
 
 def scene():
-    out = vm("cd ~/proj/agentbar; ~/.venvs/agentbar/bin/python dev/dscene_call.py get_scene 2>/dev/null")
+    out = vm("cd ~/proj/scenebar; ~/.venvs/scenebar/bin/python dev/dscene_call.py get_scene 2>/dev/null")
     try:
         return json.loads(out)
     except ValueError:
@@ -34,10 +34,10 @@ def scene():
 
 def say_in_bar(text):
     """Type into the bar, but only once it's confirmed to have keyboard focus."""
-    out = vm('W=$(xdotool search --onlyvisible --name "^Agent bar$" | head -1); '
-             'if [ -z "$W" ]; then xdotool key F4; sleep 0.8; W=$(xdotool search --onlyvisible --name "^Agent bar$" | head -1); fi; '
+    out = vm('W=$(xdotool search --onlyvisible --name "^SceneBar$" | head -1); '
+             'if [ -z "$W" ]; then xdotool key F4; sleep 0.8; W=$(xdotool search --onlyvisible --name "^SceneBar$" | head -1); fi; '
              '[ -n "$W" ] && xdotool windowactivate --sync $W; sleep 0.4; '
-             'if [ "$(xdotool getwindowfocus getwindowname)" = "Agent bar" ]; then '
+             'if [ "$(xdotool getwindowfocus getwindowname)" = "SceneBar" ]; then '
              f'xdotool type --delay 15 {json.dumps(text)}; xdotool key Return; echo TYPED; else echo NOT-FOCUSED; fi')
     if "TYPED" not in out:
         raise SystemExit(f"bar not focused, refusing to type {text!r}")
@@ -48,7 +48,7 @@ def wait_until_idle(timeout=180):
     deadline, quiet = time.time() + timeout, 0
     while time.time() < deadline and quiet < 3:
         time.sleep(2)
-        busy = "Thinking" in vm("tail -c 2000 /tmp/agentbar.log") or scene().get("asking")
+        busy = "Thinking" in vm("tail -c 2000 /tmp/scenebar.log") or scene().get("asking")
         quiet = 0 if busy else quiet + 1
 
 

@@ -25,7 +25,7 @@ class AnnotationLayer(Gtk.Window):
 
     def __init__(self, top=lambda: 140):
         super().__init__(type=Gtk.WindowType.POPUP)
-        self.top = top  # () -> y where free text goes, e.g. just under the agent bar
+        self.top = top  # () -> y where free text goes, e.g. just under the bar
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
         if visual and screen.is_composited():

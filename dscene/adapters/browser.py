@@ -5,7 +5,7 @@ its content changes. Over CDP we open, activate and close tabs, read and set the
 position, and screenshot tabs in the background (even in a minimized window).
 
 The user browses in these windows too, so the agent only ever closes deck tabs it opened
-itself (recorded in ~/.cache/agentbar/agent-tabs.json, which survives a restart of the
+itself (recorded in ~/.cache/dscene/agent-tabs.json, which survives a restart of the
 bar) that the user hasn't taken up. Pages it opened for an ordinary request (answers,
 videos, tutorials) are the user's to keep; see ChromeSlot.agent_tabs.
 """
@@ -22,7 +22,7 @@ import websocket
 
 from dscene.adapters.base import frame_rect, place_window, sh
 
-AGENT_TABS = Path.home() / ".cache" / "agentbar" / "agent-tabs.json"
+AGENT_TABS = Path.home() / ".cache" / "dscene" / "agent-tabs.json"
 
 
 def _agent_tabs():
@@ -133,8 +133,8 @@ class ChromeSlot:
     def __init__(self, role, port):
         self.role = role
         self.port = port
-        self.wm_class = f"agentbar-{role}"
-        self.profile = Path.home() / ".cache" / "agentbar" / role
+        self.wm_class = f"dscene-{role}"
+        self.profile = Path.home() / ".cache" / "dscene" / role
         self.win_id = None
         self.rect = None  # last geometry we placed the window at
         self.shown_tab = None  # the tab this window last showed

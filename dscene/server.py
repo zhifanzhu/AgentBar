@@ -1,7 +1,7 @@
 """dscene MCP server: the protocol agents use to show and restore scenes on the desktop.
 
 Runs in a background thread of the process that hosts the Stage (dscene/stage.py), e.g.
-agentBar, serving MCP over HTTP at http://127.0.0.1:8765/mcp. Tools that touch GTK run on
+SceneBar, serving MCP over HTTP at http://127.0.0.1:8765/mcp. Tools that touch GTK run on
 the GTK main loop; slow work (Chrome, Blender, LibreOffice, the grounding model) runs in
 worker threads.
 

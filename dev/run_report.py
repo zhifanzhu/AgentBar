@@ -86,7 +86,7 @@ def restore(run, cid):
     if not scene["panes"]:
         sys.exit(f"{cid} is an empty desktop: nothing to restore")
     arg = json.dumps({"scene": scene, "look": False})
-    out = subprocess.run(["ssh", "archvm", "cd ~/proj/agentbar && ~/.venvs/agentbar/bin/python "
+    out = subprocess.run(["ssh", "archvm", "cd ~/proj/scenebar && ~/.venvs/scenebar/bin/python "
                           f"dev/dscene_call.py set_scene {json.dumps(arg)}"],
                          capture_output=True, text=True)
     print(out.stdout.strip() or out.stderr.strip()[-500:])

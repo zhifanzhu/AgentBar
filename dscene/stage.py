@@ -2,7 +2,7 @@
 
 It owns the window reconciliation (Desktop), the deck and which card is showing, the
 overlays (marks, captions, toasts, question popups), screenshots, the text selection
-and the clipboard. dscene's MCP server drives it; the app hosting dscene (agentBar)
+and the clipboard. dscene's MCP server drives it; the app hosting dscene (SceneBar)
 plugs in through a Host (dscene/host.py) for its own UI: the strip it occupies, cards
 for the deck, questions in its own window.
 

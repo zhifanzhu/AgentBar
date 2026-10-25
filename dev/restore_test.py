@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Round-trip test of scene restore over dscene (no LLM): capture A, change the screen,
 set_scene(A), and compare. Run in the VM while the bar is up:
-    ~/.venvs/agentbar/bin/python dev/restore_test.py
+    ~/.venvs/scenebar/bin/python dev/restore_test.py
 """
 import asyncio
 import json

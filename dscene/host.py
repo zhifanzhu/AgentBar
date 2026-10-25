@@ -1,4 +1,4 @@
-"""What dscene needs from the app it runs inside (e.g. agentBar). Every hook has a default,
+"""What dscene needs from the app it runs inside (e.g. SceneBar). Every hook has a default,
 so dscene also works with no host at all: then it shows questions in its own popup and
 deck cards only exist as swap_scene for MCP clients.
 
