@@ -3,7 +3,7 @@
 
 SceneBar is a small AI bar that sits at the top of the Linux desktop. Press F4, type what you need, and it sets up the screen for it, e.g. a few hotels side by side with their maps, ready to flip through like cards, or a Blender window with the next button to press circled. SceneBar works alongside the person at the computer rather than in their place.
 
-Demo video: https://www.youtube.com/watch?v=qjR1piz74VA
+Demo video: https://youtu.be/C1G2WH4QIcI
 
 Runs on Arch Linux + XFCE (X11).
 
