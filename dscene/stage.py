@@ -152,7 +152,12 @@ class Stage:
 
         def work():
             try:
-                result = {"scene": scene.name, "panes": self.desktop.set_scene(scene, area)}
+                live, _ = spec.with_live_links([scene])  # a made-up link: the top result instead
+                result = {"scene": scene.name, "panes": self.desktop.set_scene(live[0], area)}
+                replaced = [{"was": a.url, "now": b.url or f"a search for {b.query!r}"}
+                            for a, b in zip(scene.panes, live[0].panes) if a.kind == "url" and a.url != b.url]
+                if replaced:
+                    result["links_replaced"] = replaced  # so the model doesn't quote the dead link
             except Exception as e:  # noqa: BLE001
                 result = {"scene": scene.name, "error": f"{type(e).__name__}: {e}"}
             GLib.idle_add(finish, result)

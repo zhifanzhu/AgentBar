@@ -13,7 +13,6 @@ from gi.repository import GLib, Gtk, Pango, PangoCairo  # noqa: E402
 PAD = 16
 ACCENT = (0.23, 0.36, 0.86)   # boxes, labels, arrows
 STEP = (0.96, 0.62, 0.04)     # numbered tutorial steps
-KINDS = ("box", "step", "label", "arrow", "spotlight")
 
 
 class AnnotationLayer(Gtk.Window):

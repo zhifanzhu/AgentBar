@@ -132,7 +132,9 @@ class SceneBar(Gtk.ApplicationWindow, Host):
     def hide_chrome(self):
         if not self.get_visible():
             return False
-        self.dismiss(refocus=self.is_active())
+        # No refocus: it would raise the user's last window over what they're looking at
+        # (e.g. Blender over the agent's page they want to capture); the top window gets focus.
+        self.dismiss(refocus=False)
         return True
 
     def deck_preparing(self, count):

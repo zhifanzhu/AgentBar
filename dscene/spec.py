@@ -30,7 +30,6 @@ from pydantic import BaseModel, Field, model_validator
 VERSION = 1
 LAYOUTS = {"full": 1, "split-2": 2, "split-3": 3}  # plus "free": every pane brings its own rect
 BROWSER_KINDS = ("url", "map", "route", "search")
-APP_KINDS = ("blender", "impress", "window")
 DECKS = Path.home() / ".local" / "share" / "dscene" / "decks"
 BLOBS = Path.home() / ".local" / "share" / "dscene" / "blobs"  # .blend / .odp checkpoints
 
@@ -196,7 +195,7 @@ def with_live_links(scenes):
     web search), and redirect links for the page they lead to (the card shows the real link;
     /close knows the tab's site). Returns (scenes, names of scenes left showing a search)."""
     checks = [(i, j, p.url) for i, s in enumerate(scenes) for j, p in enumerate(s.panes)
-              if p.kind == "url" and p.url]
+              if p.kind == "url" and (p.url or "").startswith(("http://", "https://"))]
     with ThreadPoolExecutor(8) as pool:
         results = list(pool.map(lambda c: _live_link(c[2], scenes[c[0]].name), checks))
     scenes = [s.model_copy(deep=True) for s in scenes]
