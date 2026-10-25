@@ -1,4 +1,5 @@
-# AgentBar
+
+# <img width="443" height="67" alt="AgentBar" src="https://github.com/user-attachments/assets/645150dd-8bbc-4693-8f51-5aac663c70ee" />
 
 Demo video: https://www.youtube.com/watch?v=qjR1piz74VA
 
