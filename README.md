@@ -1,5 +1,5 @@
 
-# <img width="443" height="67" alt="AgentBar" src="https://github.com/user-attachments/assets/645150dd-8bbc-4693-8f51-5aac663c70ee" />
+# <img width="443" height="67" alt="SceneBar" src="https://github.com/user-attachments/assets/6e3ccd11-4505-41e9-a852-67001255290b" />
 
 Demo video: https://www.youtube.com/watch?v=qjR1piz74VA
 
