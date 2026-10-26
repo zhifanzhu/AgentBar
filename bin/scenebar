@@ -1,0 +1,13 @@
+#!/bin/sh
+# SceneBar's command:
+#   scenebar              start the bar (then F4, or scenebar-toggle, shows and hides it)
+#   scenebar setup        check dependencies, link the Blender bridge, bind F4 (XFCE)
+#   scenebar uninstall    undo setup, then offer to delete SceneBar's settings and data
+# Python: $SCENEBAR_PYTHON, else a venv at .venv next to this folder, else python3.
+ROOT=$(dirname "$(dirname "$(readlink -f "$0")")")
+PY=${SCENEBAR_PYTHON:-$ROOT/.venv/bin/python}
+command -v "$PY" >/dev/null 2>&1 || PY=python3
+case "$1" in
+    setup|uninstall) exec "$PY" "$ROOT/usersetup.py" "$@" ;;
+esac
+exec "$PY" "$ROOT/scenebar.py" "$@"

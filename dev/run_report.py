@@ -10,7 +10,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-RUNS = Path(__file__).resolve().parents[1] / "runs"
+# Where the bar records runs (recorder.RUNS); on a machine that only shares the checkout
+# (e.g. the VM's host), the checkout's runs/ that the VM's state dir links to.
+RUNS = next((p for p in (Path.home() / ".local" / "state" / "scenebar" / "runs",
+                         Path(__file__).resolve().parents[1] / "runs") if p.exists()),
+            Path.home() / ".local" / "state" / "scenebar" / "runs")
 WAITS_FOR_USER = {"ask_user", "guide_step", "select_region"}
 
 
@@ -86,7 +90,7 @@ def restore(run, cid):
     if not scene["panes"]:
         sys.exit(f"{cid} is an empty desktop: nothing to restore")
     arg = json.dumps({"scene": scene, "look": False})
-    out = subprocess.run(["ssh", "archvm", "cd ~/proj/scenebar && ~/.venvs/scenebar/bin/python "
+    out = subprocess.run(["ssh", "archvm", "cd ~/proj/scenebar && python3 "
                           f"dev/dscene_call.py set_scene {json.dumps(arg)}"],
                          capture_output=True, text=True)
     print(out.stdout.strip() or out.stderr.strip()[-500:])

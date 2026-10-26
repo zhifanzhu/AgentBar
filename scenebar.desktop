@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SceneBar
+Comment=An AI bar that sets up your screen for a task and shows you how
+Exec=scenebar-toggle
+Icon=system-search
+Terminal=false
+Categories=Utility;
+StartupNotify=false

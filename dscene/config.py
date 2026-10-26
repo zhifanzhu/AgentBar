@@ -1,7 +1,8 @@
 """dscene's own settings, in ~/.config/dscene/config.json (no dependency on any agent).
 
   grounding      who finds a described UI element on screen (find_element, guide_step):
-                 holo = an OpenAI-compatible server running Holo3.1; gemini = a Gemini call
+                 gemini = a Gemini call (the default); holo = Holo3.1 on an OpenAI-compatible
+                 server at grounding.url (e.g. vLLM on a GPU machine: faster, no API cost)
   answer_engine  where search panes open: duckduckgo, google, bing, chatgpt, perplexity
   gemini_*       only for grounding provider gemini; GEMINI_API_KEY overrides the key
 """
@@ -11,7 +12,7 @@ from pathlib import Path
 
 CONFIG = Path.home() / ".config" / "dscene" / "config.json"
 DEFAULTS = {
-    "grounding": {"provider": "holo", "url": "http://10.0.2.2:8000/v1", "model": "holo3-1-9b"},
+    "grounding": {"provider": "gemini", "url": "", "model": "holo3-1-9b"},
     "answer_engine": "duckduckgo",
     "gemini_api_key": "",
     "gemini_model": "gemini-3.6-flash",

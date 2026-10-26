@@ -11,7 +11,8 @@ moment back. An op is an agent tool call, a model "think" step, or a user action
   {"seq", "t", "type": "checkpoint", "id": "c2", "trigger": "after:set_deck", "scene", "thumbnail"}
   {"seq", "t", "type": "op", "actor": "agent" | "model" | "user", "name", ...}
 User actions outside a request (flipping scenes, commands) go to runs/<date>/ui.jsonl.
-runs/ is inside the shared ~/proj folder, so it can be read from the host too.
+runs/ is ~/.local/state/scenebar/runs; make it a symlink to read runs from somewhere else
+(e.g. a checkout shared with another machine).
 """
 import base64
 import io
@@ -22,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-RUNS = Path(__file__).resolve().parent / "runs"
+RUNS = Path.home() / ".local" / "state" / "scenebar" / "runs"
 THUMB_WIDTH = 480
 
 

@@ -1,8 +1,9 @@
 """Grounding: where on a screenshot is "the Add Modifier button"? Returns a point.
 
 Two providers, chosen by grounding.provider in dscene's config (dscene/config.py):
-  holo    Holo3.1 on an OpenAI-compatible server (e.g. vLLM on a GPU machine); ~0.6 s
-  gemini  a Gemini call with the screenshot (needs a Gemini API key; costs a request)
+  gemini  a Gemini call with the screenshot (the default; needs a Gemini API key; ~1.4 s)
+  holo    Holo3.1 on an OpenAI-compatible server at grounding.url (e.g. vLLM on a GPU
+          machine); ~0.6 s
 Both answer in coordinates normalised to 0-1000 on each axis.
 """
 import base64
@@ -47,6 +48,9 @@ def _prompt(description):
 
 
 def _holo(cfg, png, description):
+    if not cfg["url"]:
+        raise GroundingError("grounding provider holo needs its server's URL (grounding.url in "
+                             "dscene's config, e.g. http://localhost:8000/v1)")
     body = {"model": cfg["model"], "temperature": 0.0, "max_tokens": 64,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}},

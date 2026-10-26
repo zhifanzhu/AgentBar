@@ -25,7 +25,7 @@ def vm(cmd):
 
 
 def scene():
-    out = vm("cd ~/proj/scenebar; ~/.venvs/scenebar/bin/python dev/dscene_call.py get_scene 2>/dev/null")
+    out = vm("cd ~/proj/scenebar; python3 dev/dscene_call.py get_scene 2>/dev/null")
     try:
         return json.loads(out)
     except ValueError:

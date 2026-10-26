@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Time one agent-style Gemini call (all dscene tools + a screenshot) on several models.
-Run in the VM while the bar is up:  ~/.venvs/scenebar/bin/python dev/latency_bench.py [image.jpg]
+Run in the VM while the bar is up:  python3 dev/latency_bench.py [image.jpg]
 Tool calls are not executed; only the model's response time is measured."""
 import asyncio
 import base64
@@ -17,10 +17,10 @@ TRIALS = 3
 
 
 async def tool_decls():
-    from mcp import Client
-    async with Client(brain.DSCENE_URL) as c:
+    from dscene.client import connect
+    async with connect(brain.DSCENE_URL) as c:
         return [{"type": "function", "name": t.name, "description": t.description or "",
-                 "parameters": brain.plain_schema(t.input_schema)} for t in (await c.list_tools()).tools]
+                 "parameters": brain.plain_schema(t.inputSchema)} for t in (await c.list_tools()).tools]
 
 
 def main():

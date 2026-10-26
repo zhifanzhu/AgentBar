@@ -7,7 +7,8 @@ reply for the bar. The conversation carries over between requests until reset().
 Providers:
   gemini  Google Gemini API (Interactions endpoint, store: false); the history is kept here
           and sent with each call
-  local   any OpenAI-compatible server with tool calling, e.g. the vLLM server on vast
+  local   any OpenAI-compatible server with tool calling, e.g. vLLM serving Holo3.1; at
+          local_url, or (if that's empty) the Holo server dscene uses (/ground holo URL)
 
 Config lives in ~/.config/scenebar/brain.json; edit it by hand or with the bar's
 /model and /key commands. GEMINI_API_KEY in the environment overrides the stored key.
@@ -30,7 +31,7 @@ CONFIG = Path.home() / ".config" / "scenebar" / "brain.json"
 DEFAULTS = {
     "provider": "gemini",
     "models": {"gemini": "gemini-3.6-flash", "local": "holo3-1-9b"},
-    "local_url": "http://10.0.2.2:8000/v1",
+    "local_url": "",  # empty: the same server as dscene's Holo (grounding.url)
     "gemini_api_key": "",
     "max_steps": 16,
     # minimal is fastest (gemini-3.6-flash: ~1.8 s per step vs ~4.2 s for 3.8-flash at low);
@@ -126,10 +127,18 @@ def gemini_key(cfg):
     return os.environ.get("GEMINI_API_KEY") or cfg.get("gemini_api_key", "")
 
 
+def local_url(cfg, required=True):
+    """The OpenAI-compatible server for the local provider: local_url, else dscene's Holo."""
+    url = cfg.get("local_url") or dscene_config.load()["grounding"]["url"]
+    if not url and required:
+        raise BrainError("no local model server: set it with /ground holo URL")
+    return url
+
+
 def describe(cfg):
     p = cfg["provider"]
     extra = (" · key set" if gemini_key(cfg) else " · NO KEY (/key gemini …)") if p == "gemini" \
-        else f" · {cfg['local_url']}"
+        else f" · {local_url(cfg, required=False) or 'NO SERVER (/ground holo URL)'}"
     return f"{p} · {cfg['models'][p]}{extra}"
 
 
@@ -180,10 +189,9 @@ def _result_parts(result):
         if c.type == "text":
             texts.append(c.text)
         elif c.type == "image":
-            images.append((getattr(c, "mime_type", None) or getattr(c, "mimeType", "image/png"), c.data))
+            images.append((c.mimeType, c.data))
     text = "\n".join(texts) or ("(image)" if images else "OK")
-    failed = getattr(result, "is_error", None) or getattr(result, "isError", False)
-    return (f"ERROR: {text}" if failed else text), images
+    return (f"ERROR: {text}" if result.isError else text), images
 
 
 def _stopped(name, text):
@@ -252,13 +260,13 @@ class Agent:
         return reply
 
     async def _run(self, text, cfg):
-        from mcp import Client  # imported lazily: only the brain thread needs it
+        from dscene import client  # imported lazily: only the brain thread needs the MCP client
 
-        async with Client(DSCENE_URL) as dscene:
+        async with client.connect(DSCENE_URL) as dscene:
             self.pending = None
             await self._checkpoint(dscene, "start")
             tools = [{"name": t.name, "description": t.description or "",
-                      "parameters": plain_schema(t.input_schema)}
+                      "parameters": plain_schema(t.inputSchema)}
                      for t in (await dscene.list_tools()).tools
                      if self.mode == "deck" or t.name not in DECK_TOOLS]
             loop = self._gemini if cfg["provider"] == "gemini" else self._openai
@@ -410,7 +418,7 @@ class Agent:
             self.messages.append(system)
         self.messages.append({"role": "user", "content": text})
         for step in range(cfg["max_steps"]):
-            resp = await asyncio.to_thread(self._model_call, f"{cfg['local_url']}/chat/completions", {
+            resp = await asyncio.to_thread(self._model_call, f"{local_url(cfg)}/chat/completions", {
                 "model": cfg["models"]["local"], "messages": self.messages, "tools": declared,
                 "tool_choice": "auto", "temperature": 0.0, "max_tokens": 2000,
                 "chat_template_kwargs": {"enable_thinking": False}}, None, step)
@@ -438,7 +446,7 @@ class Agent:
 def list_models(cfg=None):
     cfg = cfg or load_config()
     if cfg["provider"] == "local":
-        return [m["id"] for m in _http(f"{cfg['local_url']}/models", timeout=10)["data"]]
+        return [m["id"] for m in _http(f"{local_url(cfg)}/models", timeout=10)["data"]]
     key = gemini_key(cfg)
     if not key:
         raise BrainError("no Gemini API key: type /key gemini YOUR_KEY")

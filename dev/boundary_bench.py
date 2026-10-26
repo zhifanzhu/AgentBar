@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Time dscene tools over MCP, the way the brain calls them: median and slowest of N calls.
 Used to compare before/after moving code across the dscene / SceneBar boundary.
-Run in the VM while the bar is up:  ~/.venvs/scenebar/bin/python dev/boundary_bench.py [N]
+Run in the VM while the bar is up:  python3 dev/boundary_bench.py [N]
 It shows a test page in the agent's first browser window and draws (then removes) a label.
 """
 import asyncio
@@ -9,10 +9,11 @@ import json
 import statistics
 import sys
 import time
+from pathlib import Path
 
-from mcp import Client
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from dscene.client import URL, connect  # noqa: E402
 
-URL = "http://127.0.0.1:8765/mcp"
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 10
 CALLS = [
     ("get_scene", {}),
@@ -28,7 +29,7 @@ CALLS = [
 
 
 async def main():
-    async with Client(URL) as c:
+    async with connect(URL) as c:
         await c.call_tool("get_scene", {})  # warm up the session
         print(f"{'tool':18s} {'median':>8s} {'slowest':>8s}   ({N} calls each)")
         results = {}
@@ -38,7 +39,7 @@ async def main():
                 t0 = time.perf_counter()
                 result = await c.call_tool(name, args)
                 times.append((time.perf_counter() - t0) * 1000)
-                errors += bool(getattr(result, "is_error", None) or getattr(result, "isError", False))
+                errors += bool(result.isError)
             results[name] = {"median_ms": round(statistics.median(times), 1), "max_ms": round(max(times), 1),
                              "errors": errors}
             print(f"{name:18s} {results[name]['median_ms']:7.1f}ms {results[name]['max_ms']:7.1f}ms"

@@ -2,4 +2,4 @@
 # Hotkey target: poke the running bar over D-Bus (fast), or start it.
 gdbus call --session --dest dev.scenebar.SceneBar --object-path /dev/scenebar/SceneBar \
   --method org.freedesktop.Application.Activate '{}' >/dev/null 2>&1 \
-  || { cd "$(dirname "$(readlink -f "$0")")/.." && exec "$HOME/.venvs/scenebar/bin/python" scenebar.py; }
+  || exec "$(dirname "$(readlink -f "$0")")/scenebar"

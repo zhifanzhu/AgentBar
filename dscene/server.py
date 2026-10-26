@@ -19,7 +19,7 @@ import threading
 from typing import Literal
 
 from gi.repository import GLib
-from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.fastmcp import FastMCP, Image  # MCP Python SDK 1.x (Arch's python-mcp)
 from pydantic import BaseModel, Field
 
 from dscene import desktop, grounding, spec
@@ -84,8 +84,9 @@ async def _on_gtk_later(fn, *args, timeout=None):
     return await asyncio.wait_for(fut, timeout)
 
 
-def build(stage):
-    server = MCPServer("dscene", instructions=INSTRUCTIONS, log_level="WARNING")
+def build(stage, host="127.0.0.1", port=PORT):
+    # host given here, not later: FastMCP picks its DNS-rebinding protection from it
+    server = FastMCP("dscene", instructions=INSTRUCTIONS, log_level="WARNING", host=host, port=port)
 
     async def screen_jpeg():
         jpeg, _ = await _on_gtk(stage.screenshot_png, None, "jpeg")
@@ -363,7 +364,7 @@ def build(stage):
 
 
 def start(stage, host="127.0.0.1", port=PORT):
-    server = build(stage)
-    threading.Thread(target=lambda: asyncio.run(server.run_streamable_http_async(host=host, port=port)),
+    server = build(stage, host, port)
+    threading.Thread(target=lambda: asyncio.run(server.run_streamable_http_async()),
                      daemon=True, name="dscene").start()
     return f"http://{host}:{port}/mcp"

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Round-trip test of scene restore over dscene (no LLM): capture A, change the screen,
 set_scene(A), and compare. Run in the VM while the bar is up:
-    ~/.venvs/scenebar/bin/python dev/restore_test.py
+    python3 dev/restore_test.py
 """
 import asyncio
 import json
+import sys
+from pathlib import Path
 
-from mcp import Client
-
-URL = "http://127.0.0.1:8765/mcp"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from dscene.client import URL, connect  # noqa: E402
 
 
 def text(result):
@@ -16,7 +17,7 @@ def text(result):
 
 
 async def main():
-    async with Client(URL) as c:
+    async with connect(URL) as c:
         before = text(await c.call_tool("get_scene", {}))[0]["windows"]
         scene_a = text(await c.call_tool("capture_scene", {"name": "A"}))[0]
         print("captured A:")

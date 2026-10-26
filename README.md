@@ -15,25 +15,54 @@ Two slow parts of computer work: comparing options means juggling a dozen tabs a
 
 Existing computer-use agents (codex, hermes, etc) take over the mouse and keyboard, which is slow, hard to trust, and teaches the user nothing.
 
-## Dependencies
+## Install
 
-Linux with an X11 session (developed on Arch Linux + XFCE).
-
-System packages (Arch names):
+Linux with an X11 session (developed on Arch Linux + XFCE). On Arch, everything comes from
+the official repositories:
 
     sudo pacman -S gtk3 python-gobject python-cairo at-spi2-core \
-        wmctrl xdotool xorg-xprop xorg-xwininfo xclip chromium xfce4-terminal
+        wmctrl xdotool xorg-xprop xorg-xwininfo xclip chromium xfce4-terminal \
+        python-mcp python-pydantic python-websocket-client python-pillow
+    git clone https://github.com/zhifanzhu/SceneBar.git
+    SceneBar/bin/scenebar setup
 
-Optional, for their adapters: `blender`, `libreoffice-fresh` (Impress, via its Python `uno`), `evince`.
+Optional: `blender` (Blender lessons and changes) and `libreoffice-fresh` (screenshots into
+Impress slides).
 
-Python packages (`requirements.txt`), in a venv that can see the system's GTK bindings:
+Elsewhere, install the same tools with your package manager, and the Python packages in a
+venv inside the checkout (`bin/scenebar` uses `.venv` when it's there):
 
-    python -m venv --system-site-packages ~/.venvs/scenebar
-    ~/.venvs/scenebar/bin/pip install -r requirements.txt
+    python3 -m venv --system-site-packages .venv
+    .venv/bin/pip install -r requirements.txt
 
-Models: a Gemini API key (`/key gemini KEY` in the bar), and optionally an OpenAI-compatible
-server with Holo3.1 for finding elements on screen (default `http://10.0.2.2:8000/v1`, set
-`grounding.url` in `~/.config/dscene/config.json`).
+`scenebar setup` checks what's missing, links the Blender bridge, adds SceneBar to the app
+menu and binds F4 (on XFCE; elsewhere, bind a key to `bin/scenebar-toggle` yourself). Run it
+again after upgrading Blender.
+
+## Run
+
+Press F4 (the first press starts the bar), type `/key gemini YOUR_KEY` once (get a key at
+https://aistudio.google.com/apikey), then type what you need. `/help` lists the commands.
+
+Gemini is the brain, and by default it also finds buttons on screen. Optionally, Holo3.1, a
+vision model from H Company, does that faster and with no API cost, served by an
+OpenAI-compatible server such as vLLM on a GPU machine: `/ground holo http://HOST:8000/v1`.
+
+## Uninstall
+
+    SceneBar/bin/scenebar uninstall
+
+It stops the bar, removes the Blender link, the menu entry and the F4 shortcut, then asks
+before deleting each of SceneBar's folders:
+
+| Folder | What's in it |
+|---|---|
+| `~/.config/scenebar`, `~/.config/dscene` | settings, your notes, the API key |
+| `~/.cache/dscene` | the agent's browser profiles (cookies, sign-ins) |
+| `~/.local/share/dscene` | saved decks, Blender and Impress checkpoints |
+| `~/.local/state/scenebar` | recordings of each request, with screenshots |
+
+Then delete the `SceneBar` folder.
 
 
 ## How it works
@@ -42,7 +71,7 @@ SceneBar has firm boundaries: it never clicks, types or runs commands on the use
 
   - Gemini is the brain. It plans and calls tools over MCP.
   - Underneath is `dscene`, an MCP server with 20 tools that describes, shows, saves and restores "scenes": which windows are on screen, where, and each app's state (Chromium pages via CDP, Blender via a bridge inside Blender, LibreOffice Impress via UNO, terminals via the accessibility tree).
-  - Holo3.1, a local vision model, finds buttons on screen in apps like Blender that offer no other way to locate them.
+  - A vision model finds buttons on screen in apps like Blender that offer no other way to locate them: Gemini, or Holo3.1 running locally.
   - `dscene` can also run without the bar, so other agents (Claude Code, Codex, Hermes) can use the same scenes and the same "show, don't take over" approach.
 
 

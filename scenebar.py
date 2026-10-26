@@ -37,7 +37,7 @@ HELP = ("? — search the text you selected (any app) · /search [WORDS] — sea
         "/deck … — compare options as cards to flip through · "
         "/show me how to … — step-by-step guidance; the agent won't do it for you · "
         "/model — show the brain · /model gemini|local [MODEL] — switch · /models — list models · "
-        "/key gemini KEY — save API key · /ground holo|gemini — who finds elements on screen · "
+        "/key gemini KEY — save API key · /ground gemini|holo [URL] — who finds elements on screen · "
         "/answers google|duckduckgo|bing|chatgpt|perplexity — where questions open · "
         "/remember TEXT — note about you, sent with every request · "
         "/close — close the deck · /new — new conversation · /shot — screenshot to slide")
@@ -53,6 +53,12 @@ CSS = b"""
 #bar .status { color: #e0e2ea; font-size: 14px; }
 #bar .question { color: #f5c46a; font-size: 14px; font-weight: bold; }
 """
+
+
+def _grounding(scene_cfg):
+    """Who finds elements on screen, for the status line: "gemini" or "holo at URL"."""
+    g = scene_cfg["grounding"]
+    return f"holo at {g['url']}" if g["provider"] == "holo" else g["provider"]
 
 
 def seed_dscene_config():
@@ -337,11 +343,17 @@ class SceneBar(Gtk.ApplicationWindow, Host):
             brain.save_config(cfg)
             dscene_config.update(gemini_api_key=args[2])  # dscene's Gemini grounding uses it too
             self.status.set_text(f"Gemini key saved · Brain: {brain.describe(cfg)}")
-        elif cmd == "/ground" and len(args) == 2 and args[1].lower() in ("holo", "gemini"):
-            dscene_config.update(grounding={"provider": args[1].lower()})
-            self.status.set_text(f"find_element now uses {args[1].lower()}")
+        elif cmd == "/ground" and len(args) in (2, 3) and args[1].lower() in ("holo", "gemini"):
+            grounding = {"provider": args[1].lower()}
+            if len(args) == 3:  # the Holo server; also the local brain's, unless brain.json sets one
+                grounding["url"] = args[2].rstrip("/")
+            if grounding["provider"] == "holo" and not grounding.get("url", scene_cfg["grounding"]["url"]):
+                self.status.set_text("Holo needs its server: /ground holo URL, e.g. http://localhost:8000/v1")
+                return
+            scene_cfg = dscene_config.update(grounding=grounding)
+            self.status.set_text(f"find_element now uses {_grounding(scene_cfg)}")
         elif cmd == "/ground":
-            self.status.set_text(f"find_element uses {scene_cfg['grounding']['provider']} · /ground holo|gemini")
+            self.status.set_text(f"find_element uses {_grounding(scene_cfg)} · /ground gemini|holo [URL]")
         elif cmd == "/answers" and len(args) == 2 and args[1].lower() in spec.ENGINES:
             dscene_config.update(answer_engine=args[1].lower())
             self.status.set_text(f"Questions now open in {args[1].lower()}")
