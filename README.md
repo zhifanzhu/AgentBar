@@ -1,7 +1,8 @@
 
 # <img width="443" height="67" alt="SceneBar" src="https://github.com/user-attachments/assets/6e3ccd11-4505-41e9-a852-67001255290b" />
 
-SceneBar is a small AI bar that sits at the top of the Linux desktop. Press F4, type what you need, and it sets up the screen for it, e.g. a few hotels side by side with their maps, ready to flip through like cards, or a Blender window with the next button to press circled. SceneBar works alongside the person at the computer rather than in their place.
+SceneBar is an LLM-powered interactive desktop steering bar. 
+With a single hotkey (e.g. default F4) we prompt what we need and SceneBar sets up the screen. For example, comparising a few hotels side by side with their maps, and flipping through them like cards; or a Blender window with the next button to press circled. SceneBar works alongside the person at the computer rather than in their place.
 
 [![SceneBar demo video](https://img.youtube.com/vi/C1G2WH4QIcI/maxresdefault.jpg)](https://youtu.be/C1G2WH4QIcI)
 
@@ -11,9 +12,9 @@ Runs on Arch Linux + XFCE (X11).
 
 ## The problem
 
-Two slow parts of computer work: comparing options means juggling a dozen tabs and windows, and unfamiliar software means switching back and forth between a tutorial and the app.
+Two slow parts of desktop work: comparing options means juggling a dozen tabs and windows, and unfamiliar software means switching back and forth between a tutorial and the app.
 
-Existing computer-use agents (codex, hermes, etc) take over the mouse and keyboard, which is slow, hard to trust, and teaches the user nothing.
+Existing computer-use agents (codex, hermes, etc) are great but they take over the mouse and keyboard, which is slow, and teaches us (the user) nothing.
 
 ## Dependencies
 
