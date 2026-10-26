@@ -8,13 +8,14 @@ With a single hotkey (e.g. default F4) we prompt what we need and SceneBar sets 
 
 ▶ [Watch the demo video](https://youtu.be/C1G2WH4QIcI)
 
-Runs on Arch Linux + XFCE (X11).
+Runs on Arch Linux + XFCE (X11). Currently tested softwares include Chromium, Blender, LibreOffice Impress, terminal.
 
 ## The problem
 
 Two slow parts of desktop work: comparing options means juggling a dozen tabs and windows, and unfamiliar software means switching back and forth between a tutorial and the app.
 
 Existing computer-use agents (codex, hermes, etc) are great but they take over the mouse and keyboard, which is slow, and teaches us (the user) nothing.
+
 
 ## Dependencies
 
